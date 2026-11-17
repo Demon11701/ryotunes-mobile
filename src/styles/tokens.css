@@ -1,0 +1,293 @@
+@font-face {
+  font-family: 'Ndot 57';
+  src: url('/fonts/Ndot57-Regular.otf') format('opentype');
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Ndot57Caps';
+  src: url('/fonts/Ndot57Caps-Regular.otf') format('opentype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Ndot 55';
+  src: url('/fonts/Ndot55-Regular.otf') format('opentype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('/fonts/SpaceGrotesk-Regular.otf') format('opentype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('/fonts/SpaceGrotesk-Medium.otf') format('opentype');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('/fonts/SpaceGrotesk-SemiBold.otf') format('opentype');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('/fonts/SpaceGrotesk-Bold.otf') format('opentype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Space Mono';
+  src: url('/fonts/SpaceMono.ttf') format('truetype');
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Unbounded';
+  src: url('/fonts/Unbounded.ttf') format('truetype');
+  font-weight: 200 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Outfit';
+  src: url('/fonts/Outfit.ttf') format('truetype');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Share Tech Mono';
+  src: url('/fonts/ShareTechMono.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Fraunces';
+  src: url('/fonts/fraunces-latin.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Fraunces';
+  src: url('/fonts/fraunces-italic-latin.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Playfair Display';
+  src: url('/fonts/PlayfairDisplay.ttf') format('truetype');
+  font-weight: 400 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'IBM Plex Sans';
+  src: url('/fonts/IBMPlexSans.ttf') format('truetype');
+  font-weight: 300 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Bebas Neue';
+  src: url('/fonts/BebasNeue.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Manrope';
+  src: url('/fonts/Manrope.ttf') format('truetype');
+  font-weight: 300 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Major Mono Display';
+  src: url('/fonts/MajorMonoDisplay.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'VT323';
+  src: url('/fonts/VT323.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Montserrat';
+  src: url('/fonts/Montserrat.ttf') format('truetype');
+  font-weight: 300 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Cormorant Garamond';
+  src: url('/fonts/CormorantGaramond.ttf') format('truetype');
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'DM Sans';
+  src: url('/fonts/DMSans.ttf') format('truetype');
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Press Start 2P';
+  src: url('/fonts/PressStart2P.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Silkscreen';
+  src: url('/fonts/Silkscreen.ttf') format('truetype');
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  /* Android Safe Areas */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+
+  /* Nothing OS x Ryoku Purple Bento Core Tokens (PlayerControl.qml / OsdValueIndicator.qml) */
+  --bento-bg-deep: #0B0910;
+  --bento-bg-surface: #14101F;
+  --bento-bg-osd-box: #161124;
+  --bento-bg-elevated: #1F1830;
+  --bento-bg-elevated-hover: #2D2246;
+  --bento-border-dim: #382C52;
+  --bento-accent-purple: #A855F7;
+  --bento-accent-lavender: #C084FC;
+  --bento-accent-bright: #E9D5FF;
+  --bento-ink: #F3EEFF;
+  --bento-muted: #9D91B8;
+  --bento-scale-ink: #847A9E;
+  --bento-error: #FF5263;
+  --bento-led-idle: #4A3E66;
+
+  /* Ryotunes Library Dynamic Tokens (populated by ThemeContext, defaulting to colors.json Ryoku Purple) */
+  --paper: #16111b;
+  --paper-lift: #1f1a23;
+  --surface-container: #231e27;
+  --surface-container-high: #2e2832;
+  --ink: #eadfed;
+  --ink-dim: #cfc2d6;
+  --ink-muted: rgba(207, 194, 214, 0.88);
+  --ink-faint: rgba(207, 194, 214, 0.68);
+  --bone: #eadfed;
+  --ink-on-bone: #342e38;
+  --sun: #ddb7ff;
+  --alert: #ffb4ab;
+  --accent: #A855F7;
+  --accent-soft: rgba(168, 85, 247, 0.16);
+  --line: rgba(234, 223, 237, 0.26);
+  --line-soft: rgba(234, 223, 237, 0.13);
+  --line-strong: rgba(234, 223, 237, 0.42);
+  --tint-5: rgba(234, 223, 237, 0.05);
+  --tint-10: rgba(234, 223, 237, 0.10);
+  --tint-16: rgba(234, 223, 237, 0.16);
+
+  --font-ndot: 'Ndot 57', 'Space Mono', monospace;
+  --font-display: 'Ndot 57', 'Space Grotesk', sans-serif;
+  --font-ui: 'Space Grotesk', system-ui, -apple-system, sans-serif;
+  --font-mono: 'Space Mono', monospace;
+  --font-jp: 'Noto Sans CJK JP', 'Hiragino Kaku Gothic ProN', sans-serif;
+
+  --radius: 8px;
+  --radius-card: 12px;
+  --dur-snap: 90ms;
+  --dur-move: 170ms;
+  --dur-swap: 210ms;
+  --dur-slow: 200ms;
+  --wash: 1;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: var(--bento-bg-deep);
+  color: var(--bento-ink);
+  font-family: var(--font-ui);
+  overflow: hidden;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Custom sleek thin scrollbar */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(168, 85, 247, 0.35);
+  border-radius: 999px;
+}
+
+.font-ndot {
+  font-family: var(--font-ndot);
+  letter-spacing: 0.04em;
+}
+.font-mono-tech {
+  font-family: var(--font-mono);
+}
+.font-display-ryo {
+  font-family: var(--font-display);
+}

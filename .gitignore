@@ -1,0 +1,27 @@
+# Dependencies & web build outputs
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Android build outputs & generated artifacts
+android/.gradle/
+android/.kotlin/
+android/build/
+android/app/build/
+android/capacitor-cordova-android-plugins/
+android/app/src/main/assets/public/
+android/app/src/main/assets/capacitor.config.json
+android/app/src/main/assets/capacitor.plugins.json
+
+# Secrets, keystores & local SDK configs
+*.jks
+*.keystore
+keystore.properties
+local.properties
+
+# Packaged APK binaries (uploaded via GitHub Releases)
+*.apk
+
+# OS / desktop metadata
+.directory
+.DS_Store

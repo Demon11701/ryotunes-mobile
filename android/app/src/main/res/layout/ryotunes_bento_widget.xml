@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/transparent">
+
+    <ImageView
+        android:id="@+id/widget_canvas_img"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="Ryotunes Bento Widget"
+        android:scaleType="fitCenter" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical">
+
+        <ImageButton
+            android:id="@+id/widget_btn_open"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:background="@android:color/transparent"
+            android:contentDescription="Open Ryotunes"
+            android:src="@android:color/transparent" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:orientation="horizontal">
+
+            <ImageButton
+                android:id="@+id/widget_btn_open_left"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:background="@android:color/transparent"
+                android:contentDescription="Open Ryotunes"
+                android:src="@android:color/transparent" />
+
+            <ImageButton
+                android:id="@+id/widget_btn_prev"
+                android:layout_width="56dp"
+                android:layout_height="match_parent"
+                android:background="@android:color/transparent"
+                android:contentDescription="Previous track"
+                android:src="@android:color/transparent" />
+
+            <ImageButton
+                android:id="@+id/widget_btn_play_pause"
+                android:layout_width="56dp"
+                android:layout_height="match_parent"
+                android:background="@android:color/transparent"
+                android:contentDescription="Play or pause"
+                android:src="@android:color/transparent" />
+
+            <ImageButton
+                android:id="@+id/widget_btn_next"
+                android:layout_width="56dp"
+                android:layout_height="match_parent"
+                android:background="@android:color/transparent"
+                android:contentDescription="Next track"
+                android:src="@android:color/transparent" />
+        </LinearLayout>
+    </LinearLayout>
+</FrameLayout>

@@ -1,0 +1,85 @@
+@keyframes ledPulse {
+  0%, 100% {
+    opacity: 1;
+    box-shadow: 0 0 8px rgba(168, 85, 247, 0.85);
+  }
+  50% {
+    opacity: 0.3;
+    box-shadow: 0 0 2px rgba(168, 85, 247, 0.25);
+  }
+}
+
+@keyframes pageEnter {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 8px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes osdReveal {
+  from {
+    opacity: 0;
+    transform: translate3d(0, -10px, 0) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes sheetSlideUp {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 24px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes flashPop {
+  0% {
+    opacity: 0;
+    transform: scale(0.75);
+  }
+  30% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.1);
+  }
+}
+
+.led-pulsing {
+  animation: ledPulse 1.5s ease-in-out infinite;
+}
+
+.page-reenter {
+  animation: pageEnter 180ms cubic-bezier(0.2, 0, 0, 1) forwards;
+}
+
+.osd-pop {
+  animation: osdReveal 160ms cubic-bezier(0.2, 0, 0, 1) forwards;
+}
+
+.sheet-rise {
+  animation: sheetSlideUp 220ms cubic-bezier(0.2, 0, 0, 1) forwards;
+}
+
+.flash-pop {
+  animation: flashPop 320ms cubic-bezier(0.2, 0, 0, 1) forwards;
+}
+
+.ryo-pressable {
+  transition: transform 90ms cubic-bezier(0.2, 0, 0, 1), background-color 90ms ease, border-color 90ms ease, opacity 90ms ease;
+}
+.ryo-pressable:active {
+  transform: scale(0.965);
+}
