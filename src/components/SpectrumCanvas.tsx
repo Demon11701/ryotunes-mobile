@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from 'react';
+import { sampleBandInterpolated } from '../audio/spectrumUtils';
 import { useTheme } from '../theme/ThemeContext';
 
 interface SpectrumCanvasProps {
@@ -44,7 +45,7 @@ export const SpectrumCanvas: React.FC<SpectrumCanvasProps> = ({
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, w, h);
+    ctx.clearRect(0, 0, w + 1, h + 1);
 
     const bands = 40;
     const slotW = w / bands;
@@ -57,7 +58,7 @@ export const SpectrumCanvas: React.FC<SpectrumCanvasProps> = ({
 
     if (mode === 'bars') {
       for (let i = 0; i < bands; i++) {
-        const raw = live && points.length > 0 ? Math.min(1, Math.max(0, (points[i] || 0) / 1000)) : 0;
+        const raw = live && points.length > 0 ? sampleBandInterpolated(points, i, bands, 1000) : 0;
         if (raw <= 0.005) continue;
         const barH = Math.max(2, raw * (h * 0.9));
         const x = i * slotW + (slotW - barW) / 2;
@@ -72,7 +73,7 @@ export const SpectrumCanvas: React.FC<SpectrumCanvasProps> = ({
     // Center-growing wave field matching NowPlaying.qml SpectrumField
     const midY = h / 2;
     for (let i = 0; i < bands; i++) {
-      const raw = live && points.length > 0 ? Math.min(1, Math.max(0, (points[i] || 0) / 1000)) : 0;
+      const raw = live && points.length > 0 ? sampleBandInterpolated(points, i, bands, 1000) : 0;
       if (raw <= 0.005) continue;
       const barH = Math.max(2, raw * (h * 0.88));
       const x = i * slotW + (slotW - barW) / 2;

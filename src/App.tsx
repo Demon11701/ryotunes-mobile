@@ -1,11 +1,11 @@
 import React, { useRef, useState } from 'react';
 import { AudioProvider, useAudio } from './audio/AudioContextProvider';
-import { AppViewMode, LibraryPage as LibraryPageKind, LibraryTab } from './audio/types';
+import { LibraryPage as LibraryPageKind, LibraryTab } from './audio/types';
 import { Backdrop } from './components/Backdrop';
-import { BentoPlayerCard } from './components/BentoPlayerCard';
-import { FullVisualizerCard } from './components/FullVisualizerCard';
+import { BentoPlayerCard, StageCenterMode } from './components/BentoPlayerCard';
+import { BottomNavBar, MainTab } from './components/BottomNavBar';
+import { FloatingMiniPlayer } from './components/FloatingMiniPlayer';
 import { NowPlayingStage } from './components/NowPlayingStage';
-import { PlayerBar } from './components/PlayerBar';
 import { SidebarDrawer } from './components/SidebarDrawer';
 import { SoundDialog } from './components/SoundDialog';
 import { Toast } from './components/Toast';
@@ -22,8 +22,10 @@ import { ThemeProvider, useTheme } from './theme/ThemeContext';
 const RyotunesShell: React.FC = () => {
   const { currentTrack, importLocalFiles, syncDeviceLibrary, isNativeAndroid, triggerOsd } = useAudio();
   const { bentoTokens } = useTheme();
-  const [viewMode, setViewMode] = useState<AppViewMode>('bento');
-  const [libPage, setLibPage] = useState<LibraryPageKind>('home');
+  const [activeTab, setActiveTab] = useState<MainTab>('stage');
+  const [stageCenterMode, setStageCenterMode] = useState<StageCenterMode>('art');
+  const [exploreSubView, setExploreSubView] = useState<'search' | 'home'>('search');
+  const [libSubPage, setLibSubPage] = useState<'library' | 'playlist' | 'album' | 'artist'>('library');
   const [libParam, setLibParam] = useState<string>('');
   const [libTab, setLibTab] = useState<LibraryTab>('songs');
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -32,11 +34,28 @@ const RyotunesShell: React.FC = () => {
   const quickFileRef = useRef<HTMLInputElement | null>(null);
 
   const navigateLibrary = (page: LibraryPageKind, param = '', tab: LibraryTab = 'songs') => {
-    setLibPage(page);
     setLibParam(param);
     setLibTab(tab);
-    setViewMode('library');
+    if (page === 'home') {
+      setExploreSubView('home');
+      setActiveTab('explore');
+    } else if (page === 'search') {
+      setExploreSubView('search');
+      setActiveTab('explore');
+    } else if (page === 'settings') {
+      setActiveTab('studio');
+    } else {
+      setLibSubPage(page);
+      setActiveTab('library');
+    }
   };
+
+  const activeSkinPage: LibraryPageKind =
+    activeTab === 'explore'
+      ? exploreSubView
+      : activeTab === 'studio'
+      ? 'settings'
+      : libSubPage;
 
   return (
     <div
@@ -45,7 +64,7 @@ const RyotunesShell: React.FC = () => {
         height: '100%',
         display: 'flex',
         flexDirection: 'column',
-        backgroundColor: viewMode === 'library' ? 'var(--paper)' : bentoTokens.bgDeep,
+        backgroundColor: activeTab === 'stage' ? bentoTokens.bgDeep : 'var(--paper)',
         position: 'relative',
         overflow: 'hidden',
       }}
@@ -64,22 +83,31 @@ const RyotunesShell: React.FC = () => {
 
       {/* Persistent Top Media.qml Capsule Bar */}
       <TopMediaBar
-        viewMode={viewMode}
-        onToggleBentoOrViz={() => setViewMode((m) => (m === 'visualizer' ? 'bento' : 'visualizer'))}
-        onToggleLibrary={() => setViewMode((m) => (m === 'library' ? 'bento' : 'library'))}
+        viewMode={activeTab}
+        onToggleBentoOrViz={() => {
+          if (activeTab !== 'stage') {
+            setActiveTab('stage');
+          } else {
+            setStageCenterMode((m) => (m === 'spectrum' ? 'art' : 'spectrum'));
+          }
+        }}
+        onToggleLibrary={() => setActiveTab((t) => (t === 'library' ? 'stage' : 'library'))}
+        onOpenSound={() => setSoundOpen(true)}
       />
 
-      {/* VIEW 1 & 2: NOTHING OS x RYOKU PURPLE BENTO HUB & FULL VISUALIZER */}
-      {(viewMode === 'bento' || viewMode === 'visualizer') && (
+      {/* TAB 01 · STAGE: Unified Bento Console (Zero Duplicate Visualizers) */}
+      {activeTab === 'stage' && (
         <main
           style={{
             flex: 1,
+            minHeight: 0,
             overflowY: 'auto',
-            padding: '16px 14px calc(var(--safe-bottom) + 20px)',
+            padding: '12px 14px 14px',
             display: 'flex',
             flexDirection: 'column',
             alignItems: 'center',
-            gap: 14,
+            justifyContent: 'center',
+            gap: 12,
             background: bentoTokens.gradientBg,
           }}
         >
@@ -89,17 +117,18 @@ const RyotunesShell: React.FC = () => {
               maxWidth: 460,
               display: 'flex',
               flexDirection: 'column',
-              gap: 14,
+              gap: 12,
             }}
           >
-            {/* Primary 1:1 PlayerControl.qml Bento Card */}
             <BentoPlayerCard
-              onOpenLibrary={() => setViewMode('library')}
+              centerMode={stageCenterMode}
+              onChangeCenterMode={setStageCenterMode}
+              onOpenLibrary={() => {
+                setLibSubPage('library');
+                setActiveTab('library');
+              }}
               onOpenNowPlaying={() => setNowPlayingOpen(true)}
             />
-
-            {/* VisualizerWidget.qml 38-col LED Matrix Card */}
-            <FullVisualizerCard tall={viewMode === 'visualizer'} />
 
             {/* Quick Instrument Controls Strip */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
@@ -189,9 +218,9 @@ const RyotunesShell: React.FC = () => {
                   cursor: 'pointer',
                 }}
               >
-                <Icon name="mic" size={14} color={bentoTokens.accentLavender} />
+                <Icon name="expand" size={14} color={bentoTokens.accentLavender} />
                 <span style={{ fontFamily: bentoTokens.fontMono, fontSize: 8.5, color: bentoTokens.ink }}>
-                  LYRICS
+                  FULL VIEW
                 </span>
               </button>
             </div>
@@ -199,22 +228,23 @@ const RyotunesShell: React.FC = () => {
         </main>
       )}
 
-      {/* VIEW 3: FULL RYOTUNES LIBRARY (colors.json Ryoku Purple + Skins) */}
-      {viewMode === 'library' && (
+      {/* TABS 02 · EXPLORE / 03 · LIBRARY / 04 · STUDIO */}
+      {activeTab !== 'stage' && (
         <div style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           <Backdrop artwork={currentTrack?.artwork} strength={0.22} />
 
-          {/* Library Sub-Header (TitleBar.qml mobile adaptation) */}
+          {/* Section Sub-Header */}
           <div
             style={{
               position: 'relative',
-              height: 44,
+              height: 42,
               padding: '0 12px',
               borderBottom: '1px solid var(--line-soft)',
               display: 'flex',
               alignItems: 'center',
               gap: 8,
               backgroundColor: 'var(--paper)',
+              flexShrink: 0,
             }}
           >
             <button
@@ -223,8 +253,8 @@ const RyotunesShell: React.FC = () => {
               aria-label="Open navigation rail"
               className="ryo-pressable"
               style={{
-                width: 34,
-                height: 34,
+                width: 32,
+                height: 32,
                 borderRadius: 'var(--radius)',
                 background: 'transparent',
                 border: 'none',
@@ -234,69 +264,117 @@ const RyotunesShell: React.FC = () => {
                 cursor: 'pointer',
               }}
             >
-              <Icon name="sidebar" size={18} color="var(--ink)" />
+              <Icon name="sidebar" size={17} color="var(--ink)" />
             </button>
 
-            <span className="font-ndot" style={{ fontSize: 12, color: 'var(--ink)', letterSpacing: 1.4 }}>
-              RYOTUNES // {libPage.toUpperCase()}
+            <span className="font-ndot" style={{ fontSize: 11.5, color: 'var(--ink)', letterSpacing: 1.3 }}>
+              {activeTab === 'explore'
+                ? exploreSubView === 'search'
+                  ? '02 · EXPLORE // PROVIDERS'
+                  : '02 · EXPLORE // HOME'
+                : activeTab === 'library'
+                ? `03 · LIBRARY // ${libSubPage.toUpperCase()}`
+                : '04 · STUDIO // RYOTUNES'}
             </span>
 
             <div style={{ flex: 1 }} />
 
-            <button
-              type="button"
-              onClick={() => navigateLibrary('search')}
-              aria-label="Search"
-              className="ryo-pressable"
-              style={{
-                width: 34,
-                height: 34,
-                borderRadius: 'var(--radius)',
-                background: 'transparent',
-                border: 'none',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                cursor: 'pointer',
-              }}
-            >
-              <Icon name="search" size={17} color="var(--ink-muted)" />
-            </button>
+            {activeTab === 'explore' && (
+              <div
+                style={{
+                  display: 'flex',
+                  gap: 4,
+                  padding: 2,
+                  borderRadius: 999,
+                  backgroundColor: 'var(--paper-lift)',
+                  border: '1px solid var(--line-soft)',
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={() => setExploreSubView('search')}
+                  className="font-mono-tech ryo-pressable"
+                  style={{
+                    height: 24,
+                    padding: '0 9px',
+                    borderRadius: 999,
+                    border: 'none',
+                    backgroundColor: exploreSubView === 'search' ? 'var(--bone)' : 'transparent',
+                    color: exploreSubView === 'search' ? 'var(--ink-on-bone)' : 'var(--ink-muted)',
+                    fontSize: 9.5,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                >
+                  SEARCH
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setExploreSubView('home')}
+                  className="font-mono-tech ryo-pressable"
+                  style={{
+                    height: 24,
+                    padding: '0 9px',
+                    borderRadius: 999,
+                    border: 'none',
+                    backgroundColor: exploreSubView === 'home' ? 'var(--bone)' : 'transparent',
+                    color: exploreSubView === 'home' ? 'var(--ink-on-bone)' : 'var(--ink-muted)',
+                    fontSize: 9.5,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                >
+                  HOME
+                </button>
+              </div>
+            )}
 
-            <button
-              type="button"
-              onClick={() => navigateLibrary('settings')}
-              aria-label="Settings"
-              className="ryo-pressable"
-              style={{
-                width: 34,
-                height: 34,
-                borderRadius: 'var(--radius)',
-                background: 'transparent',
-                border: 'none',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                cursor: 'pointer',
-              }}
-            >
-              <Icon name="settings" size={17} color="var(--ink-muted)" />
-            </button>
+            {activeTab === 'studio' && (
+              <button
+                type="button"
+                onClick={() => setSoundOpen(true)}
+                className="font-mono-tech ryo-pressable"
+                style={{
+                  height: 26,
+                  padding: '0 10px',
+                  borderRadius: 999,
+                  backgroundColor: 'var(--accent-soft)',
+                  border: '1px solid var(--accent)',
+                  color: 'var(--accent)',
+                  fontSize: 9.5,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+              >
+                DSP STUDIO
+              </button>
+            )}
           </div>
 
-          {/* Routed Library Page */}
-          <div style={{ position: 'relative', flex: 1, overflowY: 'auto', padding: '16px 16px 8px' }}>
-            {libPage === 'home' && (
-              <HomePage onNavigate={navigateLibrary} onOpenBento={() => setViewMode('bento')} />
+          {/* Active Tab Scroll Content */}
+          <div style={{ position: 'relative', flex: 1, minHeight: 0, overflowY: 'auto', padding: '14px 14px 8px' }}>
+            {activeTab === 'explore' && exploreSubView === 'search' && (
+              <SearchPage initialQuery={libParam} />
             )}
-            {libPage === 'library' && (
-              <LibraryPage initialTab={libTab} onNavigate={(p, param) => navigateLibrary(p, param)} />
+            {activeTab === 'explore' && exploreSubView === 'home' && (
+              <HomePage onNavigate={navigateLibrary} onOpenBento={() => setActiveTab('stage')} />
             )}
-            {libPage === 'search' && <SearchPage initialQuery={libParam} />}
-            {(libPage === 'playlist' || libPage === 'album' || libPage === 'artist') && (
-              <DetailPage kind={libPage} id={libParam} onBack={() => navigateLibrary('library')} />
+
+            {activeTab === 'library' && libSubPage === 'library' && (
+              <LibraryPage
+                initialTab={libTab}
+                onNavigate={(p, param) => navigateLibrary(p, param)}
+              />
             )}
-            {libPage === 'settings' && (
+            {activeTab === 'library' && (libSubPage === 'playlist' || libSubPage === 'album' || libSubPage === 'artist') && (
+              <DetailPage
+                kind={libSubPage}
+                id={libParam}
+                onBack={() => setLibSubPage('library')}
+              />
+            )}
+
+            {activeTab === 'studio' && (
               <SettingsPage
                 onOpenLibrary={(page = 'home', param = '', tab = 'songs') => navigateLibrary(page, param, tab)}
                 onOpenSound={() => setSoundOpen(true)}
@@ -304,19 +382,20 @@ const RyotunesShell: React.FC = () => {
             )}
           </div>
 
-          <PlayerBar
-            onOpenNowPlaying={() => setNowPlayingOpen(true)}
-            onOpenSound={() => setSoundOpen(true)}
-          />
+          {/* Floating Bento Mini-Player Capsule above Bottom Navigation */}
+          <FloatingMiniPlayer onOpenStage={() => setActiveTab('stage')} />
         </div>
       )}
+
+      {/* Fixed 4-Tab Bottom Navigation Bar */}
+      <BottomNavBar activeTab={activeTab} onSelectTab={setActiveTab} />
 
       {/* Overlays & Modals */}
       <SidebarDrawer
         open={drawerOpen}
-        activePage={libPage}
+        activePage={activeSkinPage}
         onSelectPage={(p, param, tab) => navigateLibrary(p, param, tab)}
-        onOpenBento={() => setViewMode('bento')}
+        onOpenBento={() => setActiveTab('stage')}
         onClose={() => setDrawerOpen(false)}
       />
 

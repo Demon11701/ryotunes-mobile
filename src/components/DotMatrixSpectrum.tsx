@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from 'react';
+import { sampleBandInterpolated } from '../audio/spectrumUtils';
 import { useTheme } from '../theme/ThemeContext';
 
 interface DotMatrixSpectrumProps {
@@ -7,6 +8,8 @@ interface DotMatrixSpectrumProps {
   cols?: number;
   rows?: number;
   maxVal?: number;
+  height?: number;
+  transparent?: boolean;
   peakColor?: string;
   midColor?: string;
   baseColor?: string;
@@ -24,6 +27,8 @@ export const DotMatrixSpectrum: React.FC<DotMatrixSpectrumProps> = ({
   cols = 26,
   rows = 5,
   maxVal = 1000,
+  height = 30,
+  transparent = false,
   peakColor,
   midColor,
   baseColor,
@@ -57,7 +62,7 @@ export const DotMatrixSpectrum: React.FC<DotMatrixSpectrumProps> = ({
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, w, h);
+    ctx.clearRect(0, 0, w + 1, h + 1);
 
     const gapX = 2;
     const gapY = 2;
@@ -66,18 +71,7 @@ export const DotMatrixSpectrum: React.FC<DotMatrixSpectrumProps> = ({
     const numPts = points.length;
 
     for (let c = 0; c < cols; c++) {
-      let val = 0;
-      if (isPlaying && numPts > 0) {
-        const startIdx = Math.floor((c / cols) * numPts);
-        const endIdx = Math.max(startIdx + 1, Math.floor(((c + 1) / cols) * numPts));
-        let bandMax = 0;
-        for (let k = startIdx; k < Math.min(numPts, endIdx); k++) {
-          const v = points[k] || 0;
-          if (v > bandMax) bandMax = v;
-        }
-        val = Math.min(1.0, Math.max(0, bandMax / maxVal));
-      }
-
+      const val = isPlaying && numPts > 0 ? sampleBandInterpolated(points, c, cols, maxVal) : 0;
       const activeRows = val > 0.01 ? Math.max(1, Math.round(val * rows)) : 0;
       for (let r = 0; r < rows; r++) {
         const rowFromBottom = rows - 1 - r;
@@ -100,11 +94,11 @@ export const DotMatrixSpectrum: React.FC<DotMatrixSpectrumProps> = ({
     <div
       style={{
         width: '100%',
-        height: 30,
-        borderRadius: 6,
-        backgroundColor: bgColor || bentoTokens.bgSurface,
-        border: `1px solid ${borderColor || bentoTokens.borderDim}`,
-        padding: 4,
+        height,
+        borderRadius: transparent ? 0 : 6,
+        backgroundColor: transparent ? 'transparent' : bgColor || bentoTokens.bgSurface,
+        border: transparent ? 'none' : `1px solid ${borderColor || bentoTokens.borderDim}`,
+        padding: transparent ? 0 : 4,
       }}
     >
       <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />

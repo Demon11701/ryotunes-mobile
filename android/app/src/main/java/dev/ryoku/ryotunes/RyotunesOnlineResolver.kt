@@ -102,9 +102,14 @@ object RyotunesOnlineResolver {
             val fPath = src.removePrefix("file://")
             val file = File(fPath)
             if (file.exists() && file.length() > 1024L) {
+                val offlineMime = when {
+                    src.endsWith(".webm", ignoreCase = true) -> "audio/webm"
+                    src.endsWith(".mp3", ignoreCase = true) -> "audio/mpeg"
+                    else -> "audio/mp4"
+                }
                 return ResolvedStream(
                     streamUrl = src,
-                    mimeType = "audio/mp4",
+                    mimeType = offlineMime,
                     durationSec = rec.optDouble("duration", 0.0),
                     waveform = jsonArrayToIntList(rec.optJSONArray("waveform"))
                 )
@@ -433,22 +438,36 @@ object RyotunesOnlineResolver {
 
     private fun pickAudioFormatStream(json: JSONObject, quality: String): ResolvedStream? {
         val fmts = json.optJSONObject("streamingData")?.optJSONArray("adaptiveFormats") ?: JSONArray()
-        val mp4List = mutableListOf<JSONObject>()
-        val anyAudioList = mutableListOf<JSONObject>()
+        val rawAudioList = mutableListOf<JSONObject>()
         for (i in 0 until fmts.length()) {
             val f = fmts.optJSONObject(i) ?: continue
             val mime = f.optString("mimeType", "")
             val url = f.optString("url", "")
-            if (url.isNotEmpty() && mime.startsWith("audio/mp4")) {
-                mp4List.add(f)
-            } else if (url.isNotEmpty() && mime.startsWith("audio/")) {
-                anyAudioList.add(f)
+            if (url.isNotEmpty() && mime.startsWith("audio/")) {
+                rawAudioList.add(f)
             }
         }
-        val chosenList = if (mp4List.isNotEmpty()) mp4List else anyAudioList
-        if (chosenList.isEmpty()) return null
-        chosenList.sortBy { it.optInt("bitrate", 0) }
-        val picked = if (quality == "LOW") chosenList.first() else chosenList.last()
+        if (rawAudioList.isEmpty()) return null
+
+        val highBitrateList = rawAudioList.filter { it.optInt("bitrate", 0) >= 96000 }
+        val pool = if (quality != "LOW" && highBitrateList.isNotEmpty()) highBitrateList else rawAudioList
+
+        val picked = if (quality == "LOW") {
+            pool.minByOrNull { it.optInt("bitrate", Int.MAX_VALUE) }
+        } else {
+            // Hi-Fi priority: itag 251 (WebM Opus ~160kbps @ 48kHz) -> itag 141 (256kbps AAC) -> itag 140 (128kbps AAC-LC) -> max bitrate
+            pool.sortedWith(
+                compareByDescending<JSONObject> { f ->
+                    when (f.optInt("itag", -1)) {
+                        251 -> 4
+                        141 -> 3
+                        140 -> 2
+                        else -> if (f.optString("mimeType", "").contains("opus")) 1 else 0
+                    }
+                }.thenByDescending { it.optInt("bitrate", 0) }
+            ).firstOrNull()
+        } ?: return null
+
         val dur = json.optJSONObject("videoDetails")?.optString("lengthSeconds", "0")?.toDoubleOrNull() ?: 0.0
         return ResolvedStream(
             streamUrl = picked.getString("url"),
@@ -548,25 +567,39 @@ object RyotunesOnlineResolver {
         } else emptyList()
 
         val transcodings = track.optJSONObject("media")?.optJSONArray("transcodings") ?: JSONArray()
-        var progUrl = ""
-        var hlsUrl = ""
+        val candidates = mutableListOf<Triple<Int, Boolean, Pair<String, String>>>()
         for (i in 0 until transcodings.length()) {
             val t = transcodings.optJSONObject(i) ?: continue
-            val proto = t.optJSONObject("format")?.optString("protocol", "") ?: ""
+            val fmt = t.optJSONObject("format")
+            val proto = fmt?.optString("protocol", "") ?: ""
+            val mime = fmt?.optString("mime_type", "") ?: ""
+            val preset = t.optString("preset", "")
+            val qStr = t.optString("quality", "")
             val tUrl = t.optString("url", "")
-            if (proto == "progressive" && progUrl.isEmpty()) progUrl = tUrl
-            if (proto == "hls" && hlsUrl.isEmpty()) hlsUrl = tUrl
+            if (tUrl.isEmpty()) continue
+            val isProg = proto == "progressive"
+            var score = if (qStr == "hq") 40 else 10
+            if (preset.contains("aac_160", ignoreCase = true) || mime.contains("aac", ignoreCase = true)) score += 30
+            else if (preset.contains("opus", ignoreCase = true) || mime.contains("ogg", ignoreCase = true)) score += 25
+            else if (preset.contains("mp3", ignoreCase = true) || mime.contains("mpeg", ignoreCase = true)) score += 15
+            if (preferProgressiveForDownload && isProg) score += 100
+            val outMime = when {
+                !isProg -> "application/x-mpegURL"
+                mime.contains("ogg") || mime.contains("opus") -> "audio/ogg"
+                mime.contains("mp4") || mime.contains("aac") -> "audio/mp4"
+                else -> "audio/mpeg"
+            }
+            candidates.add(Triple(score, isProg, tUrl to outMime))
         }
+        candidates.sortByDescending { it.first }
 
-        if (progUrl.isNotEmpty()) {
-            val streamJson = JSONObject(String(httpGetBytes("$progUrl?client_id=$cid", 6000)))
-            val u = streamJson.optString("url", "")
-            if (u.isNotEmpty()) return ResolvedStream(u, "audio/mpeg", dur, waveform)
-        }
-        if (hlsUrl.isNotEmpty() && !preferProgressiveForDownload) {
-            val streamJson = JSONObject(String(httpGetBytes("$hlsUrl?client_id=$cid", 6000)))
-            val u = streamJson.optString("url", "")
-            if (u.isNotEmpty()) return ResolvedStream(u, "application/x-mpegURL", dur, waveform)
+        for ((_, isProg, urlAndMime) in candidates) {
+            if (preferProgressiveForDownload && !isProg) continue
+            val (tUrl, outMime) = urlAndMime
+            val u = runCatching {
+                JSONObject(String(httpGetBytes("$tUrl?client_id=$cid", 6000))).optString("url", "")
+            }.getOrDefault("")
+            if (u.isNotEmpty()) return ResolvedStream(u, outMime, dur, waveform)
         }
 
         val artist = track.optJSONObject("user")?.optString("username", "") ?: ""

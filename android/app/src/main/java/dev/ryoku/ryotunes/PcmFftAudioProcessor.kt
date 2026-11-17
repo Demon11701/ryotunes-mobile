@@ -8,24 +8,27 @@ import androidx.media3.common.audio.BaseAudioProcessor
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.PI
+import kotlin.math.ceil
 import kotlin.math.cos
+import kotlin.math.floor
 import kotlin.math.hypot
-import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.sin
 
 /**
- * Zero-distortion pass-through PCM-16 AudioProcessor computing a real 512-point Hann-windowed FFT
- * across 40 logarithmic frequency bands (45Hz - 15kHz) at ~30fps.
+ * Zero-distortion pass-through PCM-16 AudioProcessor with a 1024-sample stereo-to-mono
+ * circular ring buffer, 1024-pt Hann-windowed Radix-2 FFT, fractional bin interpolation,
+ * and spatial continuity filtering across 40 logarithmic bands (40 Hz - 14 kHz).
  */
 internal class PcmFftAudioProcessor(
     private val onBands: (DoubleArray) -> Unit
 ) : BaseAudioProcessor() {
 
     companion object {
-        private const val FFT_N = 512
+        private const val FFT_N = 1024
+        private const val FFT_BITS = 10
         private const val BANDS = 40
         private const val EMIT_INTERVAL_MS = 33L
     }
@@ -37,11 +40,10 @@ internal class PcmFftAudioProcessor(
         0.5 * (1.0 - cos((2.0 * PI * i) / (FFT_N - 1)))
     }
     private val bitRev = IntArray(FFT_N).apply {
-        val bits = 9
         for (i in 0 until FFT_N) {
             var r = 0
             var x = i
-            for (b in 0 until bits) {
+            for (b in 0 until FFT_BITS) {
                 r = (r shl 1) or (x and 1)
                 x = x ushr 1
             }
@@ -49,7 +51,12 @@ internal class PcmFftAudioProcessor(
         }
     }
 
-    private val samples = DoubleArray(FFT_N)
+    private val ring = FloatArray(FFT_N)
+    private var ringPos = 0
+    private var ringFilled = 0
+
+    private val mags = DoubleArray(FFT_N / 2)
+    private val rawBands = DoubleArray(BANDS)
     private val real = DoubleArray(FFT_N)
     private val imag = DoubleArray(FFT_N)
     private val smoothed = DoubleArray(BANDS)
@@ -65,34 +72,44 @@ internal class PcmFftAudioProcessor(
 
     override fun queueInput(inputBuffer: ByteBuffer) {
         if (activeCapture) {
-            val now = System.currentTimeMillis()
-            if (now - lastEmitMs >= EMIT_INTERVAL_MS) {
-                try {
-                    val dup = inputBuffer.duplicate().order(ByteOrder.LITTLE_ENDIAN)
-                    val ch = inputAudioFormat.channelCount.coerceAtLeast(1)
-                    var idx = 0
-                    if (ch == 1) {
-                        while (dup.remaining() >= 2 && idx < FFT_N) {
-                            samples[idx++] = dup.short / 32768.0
-                        }
-                    } else {
-                        val frameBytes = ch * 2
-                        while (dup.remaining() >= frameBytes && idx < FFT_N) {
-                            var sum = 0.0
-                            for (c in 0 until ch) {
-                                sum += dup.short
-                            }
-                            samples[idx++] = (sum / ch) / 32768.0
-                        }
+            try {
+                val dup = inputBuffer.duplicate().order(ByteOrder.LITTLE_ENDIAN)
+                val ch = inputAudioFormat.channelCount.coerceAtLeast(1)
+                if (ch == 1) {
+                    while (dup.remaining() >= 2) {
+                        val s = dup.short.toFloat() / 32768f
+                        ring[ringPos] = s
+                        ringPos = (ringPos + 1) and (FFT_N - 1)
+                        if (ringFilled < FFT_N) ringFilled++
                     }
-                    if (idx >= 64) {
-                        while (idx < FFT_N) samples[idx++] = 0.0
-                        emitSpectrum(inputAudioFormat.sampleRate.coerceAtLeast(22050))
-                        lastEmitMs = now
+                } else if (ch == 2) {
+                    while (dup.remaining() >= 4) {
+                        val left = dup.short.toFloat()
+                        val right = dup.short.toFloat()
+                        ring[ringPos] = ((left + right) * 0.5f) / 32768f
+                        ringPos = (ringPos + 1) and (FFT_N - 1)
+                        if (ringFilled < FFT_N) ringFilled++
                     }
-                } catch (_: Throwable) {
-                    // Preserve audio output even if FFT read encounters unexpected slice
+                } else {
+                    val frameBytes = ch * 2
+                    while (dup.remaining() >= frameBytes) {
+                        var sum = 0f
+                        for (c in 0 until ch) {
+                            sum += dup.short.toFloat()
+                        }
+                        ring[ringPos] = (sum / ch) / 32768f
+                        ringPos = (ringPos + 1) and (FFT_N - 1)
+                        if (ringFilled < FFT_N) ringFilled++
+                    }
                 }
+
+                val now = System.currentTimeMillis()
+                if (ringFilled >= 256 && now - lastEmitMs >= EMIT_INTERVAL_MS) {
+                    emitSpectrum(inputAudioFormat.sampleRate.coerceAtLeast(22050))
+                    lastEmitMs = now
+                }
+            } catch (_: Throwable) {
+                // Keep playback untouched if an unexpected buffer slice arrives
             }
         }
 
@@ -104,17 +121,25 @@ internal class PcmFftAudioProcessor(
 
     override fun onFlush() {
         lastEmitMs = 0L
+        ring.fill(0f)
+        ringPos = 0
+        ringFilled = 0
     }
 
     override fun onReset() {
         lastEmitMs = 0L
+        ring.fill(0f)
+        ringPos = 0
+        ringFilled = 0
         smoothed.fill(0.0)
     }
 
     private fun emitSpectrum(sampleRate: Int) {
+        val startOffset = ringPos
         for (i in 0 until FFT_N) {
+            val sample = ring[(startOffset + i) and (FFT_N - 1)].toDouble()
             val j = bitRev[i]
-            real[j] = samples[i] * hann[i]
+            real[j] = sample * hann[i]
             imag[j] = 0.0
         }
 
@@ -146,32 +171,55 @@ internal class PcmFftAudioProcessor(
             size = size shl 1
         }
 
+        val normScale = FFT_N * 0.25
+        val nyquistBin = (FFT_N / 2) - 1
+        for (k in 0..nyquistBin) {
+            mags[k] = hypot(real[k], imag[k]) / normScale
+        }
+
         val nyquist = sampleRate / 2.0
-        val minHz = 45.0
-        val maxHz = min(15000.0, nyquist * 0.92).coerceAtLeast(1000.0)
+        val minHz = 40.0
+        val maxHz = min(14000.0, nyquist * 0.92).coerceAtLeast(1000.0)
+        val ratio = maxHz / minHz
+
+        for (i in 0 until BANDS) {
+            val fc = minHz * ratio.pow(i / (BANDS - 1).toDouble())
+            val fLow = minHz * ratio.pow((i - 0.5).coerceAtLeast(0.0) / (BANDS - 1).toDouble())
+            val fHigh = minHz * ratio.pow((i + 0.5).coerceAtMost((BANDS - 1).toDouble()) / (BANDS - 1).toDouble())
+
+            val exactBin = ((fc * FFT_N) / sampleRate).coerceIn(1.0, (nyquistBin - 1).toDouble())
+            val binLow = floor(exactBin).toInt().coerceIn(1, nyquistBin - 1)
+            val binHigh = ceil(exactBin).toInt().coerceIn(binLow, nyquistBin)
+            val frac = exactBin - binLow
+            val lerped = mags[binLow] * (1.0 - frac) + mags[binHigh] * frac
+
+            val spanLow = floor((fLow * FFT_N) / sampleRate).toInt().coerceIn(1, nyquistBin - 1)
+            val spanHigh = ceil((fHigh * FFT_N) / sampleRate).toInt().coerceIn(spanLow, nyquistBin)
+            var windowPeak = lerped
+            for (k in spanLow..spanHigh) {
+                if (mags[k] > windowPeak) windowPeak = mags[k]
+            }
+
+            val energy = lerped * 0.55 + windowPeak * 0.45
+            val freqWeight = 1.0 + (i / (BANDS - 1).toDouble()) * 1.55
+            val compressed = (energy * 4.2 * freqWeight).coerceAtLeast(0.0).pow(0.65)
+            rawBands[i] = (compressed * 420.0).coerceIn(0.0, 1000.0)
+        }
+
         val out = DoubleArray(BANDS)
+        for (i in 0 until BANDS) {
+            val left = rawBands[max(0, i - 1)]
+            val center = rawBands[i]
+            val right = rawBands[min(BANDS - 1, i + 1)]
+            val spatial = 0.22 * left + 0.56 * center + 0.22 * right
 
-        for (b in 0 until BANDS) {
-            val f0 = minHz * (maxHz / minHz).pow(b.toDouble() / BANDS)
-            val f1 = minHz * (maxHz / minHz).pow((b + 1).toDouble() / BANDS)
-            val bin0 = ((f0 * FFT_N) / sampleRate).toInt().coerceIn(1, (FFT_N / 2) - 2)
-            val bin1 = max(bin0 + 1, ((f1 * FFT_N) / sampleRate).toInt()).coerceIn(bin0 + 1, FFT_N / 2 - 1)
-
-            var peak = 0.0
-            for (k in bin0..bin1) {
-                val mag = hypot(real[k], imag[k]) / (FFT_N * 0.25)
-                if (mag > peak) peak = mag
-            }
-            // Pre-emphasis weight slightly lifts mids/highs while keeping bass reactive
-            val freqWeight = 1.0 + (b / BANDS.toDouble()) * 1.45
-            val dbScaled = (ln(1.0 + peak * 18.0 * freqWeight) * 340.0).coerceIn(0.0, 1000.0)
-            val next = if (dbScaled >= smoothed[b]) {
-                smoothed[b] * 0.25 + dbScaled * 0.75
+            val next = if (spatial >= smoothed[i]) {
+                smoothed[i] * 0.18 + spatial * 0.82
             } else {
-                smoothed[b] * 0.58 + dbScaled * 0.42
+                smoothed[i] * 0.72 + spatial * 0.28
             }
-            smoothed[b] = if (next < 6.0) 0.0 else next
-            out[b] = smoothed[b]
+            smoothed[i] = if (next < 5.0) 0.0 else next
+            out[i] = smoothed[i]
         }
 
         onBands(out)

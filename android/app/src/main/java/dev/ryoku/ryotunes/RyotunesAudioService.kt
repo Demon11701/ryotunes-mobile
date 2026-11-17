@@ -26,6 +26,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
@@ -44,6 +45,7 @@ import androidx.media3.common.Player
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.audio.AudioSink
@@ -93,6 +95,7 @@ class RyotunesAudioService : Service() {
     private lateinit var pcmFftProcessor: PcmFftAudioProcessor
     private lateinit var mediaSession: MediaSessionCompat
     private lateinit var notificationManager: NotificationManager
+    private lateinit var powerManager: PowerManager
 
     private var queue: List<NativeTrack> = emptyList()
     private var currentIndex: Int = 0
@@ -125,14 +128,13 @@ class RyotunesAudioService : Service() {
     private var cachedArtBitmap: Bitmap? = null
     private var lastSpectrumBands: DoubleArray? = null
     private var lastPersistAtMs: Long = 0L
-    private var lastWidgetTickAtMs: Long = 0L
 
     private val noisyReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY &&
                 ::player.isInitialized && player.isPlaying
             ) {
-                player.pause()
+                pauseImmediate()
             }
         }
     }
@@ -143,10 +145,6 @@ class RyotunesAudioService : Service() {
             if (::player.isInitialized && player.isPlaying) {
                 if (uiActive) emitState()
                 val now = System.currentTimeMillis()
-                if (now - lastWidgetTickAtMs >= 1000L) {
-                    updateWidget()
-                    lastWidgetTickAtMs = now
-                }
                 if (now - lastPersistAtMs >= 3000L) {
                     persistServiceState()
                     lastPersistAtMs = now
@@ -156,9 +154,32 @@ class RyotunesAudioService : Service() {
         }
     }
 
+    private val widgetLiveTicker = object : Runnable {
+        override fun run() {
+            if (::player.isInitialized && cachedIsPlaying && isScreenInteractive()) {
+                updateFftCaptureState()
+                val track = queue.getOrNull(currentIndex)
+                val durMs = when {
+                    player.duration > 0L -> player.duration
+                    (track?.durationSec ?: 0.0) > 0.0 -> ((track!!.durationSec) * 1000.0).toLong()
+                    else -> 0L
+                }
+                RyotunesBentoWidgetProvider.updateLiveSpectrumAndProgress(
+                    this@RyotunesAudioService,
+                    lastSpectrumBands,
+                    player.currentPosition.coerceAtLeast(0L),
+                    durMs,
+                    true
+                )
+                mainHandler.postDelayed(this, 350L)
+            }
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         ensureNotificationChannel()
 
         pcmFftProcessor = PcmFftAudioProcessor { bands ->
@@ -197,7 +218,12 @@ class RyotunesAudioService : Service() {
             }
         }
 
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(15_000, 50_000, 150, 300)
+            .build()
+
         player = ExoPlayer.Builder(this, renderersFactory)
+            .setLoadControl(loadControl)
             .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
             .setAudioAttributes(attrs, true)
             .setHandleAudioBecomingNoisy(true)
@@ -236,8 +262,12 @@ class RyotunesAudioService : Service() {
                 updateWidget()
                 persistServiceState()
                 mainHandler.removeCallbacks(positionTicker)
+                mainHandler.removeCallbacks(widgetLiveTicker)
                 if (isPlaying) {
                     mainHandler.post(positionTicker)
+                    if (isScreenInteractive()) {
+                        mainHandler.postDelayed(widgetLiveTicker, 350L)
+                    }
                 }
             }
 
@@ -309,6 +339,7 @@ class RyotunesAudioService : Service() {
     override fun onDestroy() {
         persistServiceState()
         mainHandler.removeCallbacks(positionTicker)
+        mainHandler.removeCallbacks(widgetLiveTicker)
         pcmFftProcessor.activeCapture = false
         releaseAudioEffects()
         artExecutor.shutdownNow()
@@ -354,27 +385,47 @@ class RyotunesAudioService : Service() {
         persistServiceState()
     }
 
-    fun play() {
+    fun play() = playImmediate()
+
+    fun pause() = pauseImmediate()
+
+    fun togglePlay() = togglePlayImmediate()
+
+    fun playImmediate() {
         if (queue.isEmpty()) return
         promoteToForeground()
         if (player.playbackState == Player.STATE_IDLE) {
             loadCurrentTrack(true, restoredPositionMs)
-        } else {
-            player.play()
+            return
+        }
+        cachedIsPlaying = true
+        player.playWhenReady = true
+        updateFftCaptureState()
+        emitPlaybackStateNow(isPlayingOverride = true)
+        syncMediaSessionAndNotification(isPlayingOverride = true)
+        updateWidget()
+        mainHandler.removeCallbacks(positionTicker)
+        mainHandler.post(positionTicker)
+        mainHandler.removeCallbacks(widgetLiveTicker)
+        if (isScreenInteractive()) {
+            mainHandler.postDelayed(widgetLiveTicker, 350L)
         }
     }
 
-    fun pause() {
-        player.pause()
+    fun pauseImmediate() {
         cachedIsPlaying = false
+        player.playWhenReady = false
+        mainHandler.removeCallbacks(widgetLiveTicker)
         updateFftCaptureState()
+        emitPlaybackStateNow(isPlayingOverride = false)
         persistServiceState()
-        syncMediaSessionAndNotification(forceNotify = true)
+        syncMediaSessionAndNotification(forceNotify = true, isPlayingOverride = false)
         updateWidget()
     }
 
-    fun togglePlay() {
-        if (player.isPlaying) pause() else play()
+    fun togglePlayImmediate() {
+        val currentlyPlaying = player.isPlaying || (player.playWhenReady && player.playbackState == Player.STATE_BUFFERING)
+        if (currentlyPlaying) pauseImmediate() else playImmediate()
     }
 
     fun nextTrack() {
@@ -467,8 +518,12 @@ class RyotunesAudioService : Service() {
         )
     }
 
+    private fun isScreenInteractive(): Boolean {
+        return !::powerManager.isInitialized || powerManager.isInteractive
+    }
+
     private fun updateFftCaptureState() {
-        val active = uiActive && ::player.isInitialized && cachedIsPlaying
+        val active = ::player.isInitialized && cachedIsPlaying && (uiActive || isScreenInteractive())
         pcmFftProcessor.activeCapture = active
         if (!active) {
             lastSpectrumBands = null
@@ -511,6 +566,8 @@ class RyotunesAudioService : Service() {
             val itemBuilder = MediaItem.Builder().setUri(Uri.parse(track.contentUri))
             if (track.mimeType == "application/x-mpegURL" || track.contentUri.contains(".m3u8")) {
                 itemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
+            } else if (track.mimeType?.contains("webm") == true || track.contentUri.contains("mime=audio%2Fwebm")) {
+                itemBuilder.setMimeType(MimeTypes.AUDIO_WEBM)
             }
             player.setMediaItem(itemBuilder.build())
             player.prepare()
@@ -519,7 +576,9 @@ class RyotunesAudioService : Service() {
             }
             val pitch = Math.pow(2.0, currentSemitones / 12.0).toFloat()
             player.playbackParameters = PlaybackParameters(currentSpeed, pitch)
-            if (autoPlay) player.play() else player.pause()
+            cachedIsPlaying = autoPlay
+            player.playWhenReady = autoPlay
+            updateFftCaptureState()
 
             val sessionId = player.audioSessionId
             if (sessionId != C.AUDIO_SESSION_ID_UNSET && sessionId != AudioManager.ERROR) {
@@ -713,8 +772,9 @@ class RyotunesAudioService : Service() {
         }
     }
 
-    private fun syncMediaSessionAndNotification(forceNotify: Boolean = false) {
+    private fun syncMediaSessionAndNotification(forceNotify: Boolean = false, isPlayingOverride: Boolean? = null) {
         val track = queue.getOrNull(currentIndex)
+        val playing = isPlayingOverride ?: (::player.isInitialized && player.isPlaying)
         val durMs = when {
             player.duration > 0L -> player.duration
             (track?.durationSec ?: 0.0) > 0.0 -> ((track!!.durationSec) * 1000.0).toLong()
@@ -735,7 +795,7 @@ class RyotunesAudioService : Service() {
             .build()
         mediaSession.setMetadata(metadata)
 
-        val stateCode = if (player.isPlaying) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED
+        val stateCode = if (playing) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED
         val pbState = PlaybackStateCompat.Builder()
             .setActions(
                 PlaybackStateCompat.ACTION_PLAY or
@@ -757,18 +817,19 @@ class RyotunesAudioService : Service() {
             .build()
         mediaSession.setPlaybackState(pbState)
 
-        if (isForegroundStarted || player.isPlaying) {
-            val key = "${track?.id}|${player.isPlaying}|$shuffle|${cachedArtBitmap != null}"
+        if (isForegroundStarted || playing) {
+            val key = "${track?.id}|$playing|$shuffle|${cachedArtBitmap != null}"
             val now = System.currentTimeMillis()
             if (forceNotify || key != lastNotifKey || (now - lastNotifAtMs) >= 400L) {
                 lastNotifKey = key
                 lastNotifAtMs = now
-                notificationManager.notify(NOTIFICATION_ID, buildNotification())
+                notificationManager.notify(NOTIFICATION_ID, buildNotification(playing))
             }
         }
     }
 
-    private fun buildNotification(): Notification {
+    private fun buildNotification(isPlayingOverride: Boolean? = null): Notification {
+        val playing = isPlayingOverride ?: (::player.isInitialized && player.isPlaying)
         val track = queue.getOrNull(currentIndex)
         val openIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -792,13 +853,13 @@ class RyotunesAudioService : Service() {
             .setLargeIcon(cachedArtBitmap)
             .setContentIntent(contentPending)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setOngoing(player.isPlaying)
+            .setOngoing(playing)
             .setOnlyAlertOnce(true)
             .setColor(0xFFA855F7.toInt())
             .addAction(R.drawable.ic_ryo_prev, "Previous", prevPending)
             .addAction(
-                if (player.isPlaying) R.drawable.ic_ryo_pause else R.drawable.ic_ryo_play,
-                if (player.isPlaying) "Pause" else "Play",
+                if (playing) R.drawable.ic_ryo_pause else R.drawable.ic_ryo_play,
+                if (playing) "Pause" else "Play",
                 togglePending
             )
             .addAction(R.drawable.ic_ryo_next, "Next", nextPending)
@@ -837,49 +898,84 @@ class RyotunesAudioService : Service() {
     }
 
     private fun applyDspEffects(sessionId: Int) {
+        val bassActive = currentBassDb > 0
         try {
-            if (bassBoost == null) bassBoost = BassBoost(0, sessionId)
-            bassBoost?.apply {
-                enabled = currentBassDb > 0
-                if (strengthSupported && currentBassDb > 0) {
-                    setStrength(((currentBassDb / 12f) * 1000f).toInt().coerceIn(0, 1000).toShort())
+            if (bassActive) {
+                if (bassBoost == null) bassBoost = BassBoost(0, sessionId)
+                bassBoost?.apply {
+                    if (strengthSupported) {
+                        setStrength(((currentBassDb / 12f) * 650f).toInt().coerceIn(0, 750).toShort())
+                    }
+                    enabled = true
                 }
+            } else {
+                bassBoost?.enabled = false
             }
         } catch (_: Exception) {}
 
+        val eqNeeded = currentBassDb != 0
         try {
-            if (equalizer == null && currentBassDb < 0) equalizer = Equalizer(0, sessionId)
-            equalizer?.apply {
-                enabled = currentBassDb < 0
-                if (currentBassDb < 0 && numberOfBands > 0) {
+            if (eqNeeded) {
+                if (equalizer == null) equalizer = Equalizer(0, sessionId)
+                equalizer?.apply {
                     val range = bandLevelRange
                     val minMb = range.getOrElse(0) { -1500 }.toInt()
-                    val targetMb = (currentBassDb * 100).coerceIn(minMb, 0).toShort()
-                    setBandLevel(0.toShort(), targetMb)
+                    val maxMb = range.getOrElse(1) { 1500 }.toInt()
+                    val nBands = numberOfBands.toInt()
+                    for (b in 0 until nBands) {
+                        val bandIdx = b.toShort()
+                        val hz = getCenterFreq(bandIdx) / 1000
+                        val targetMb = if (currentBassDb > 0) {
+                            when {
+                                hz <= 90 -> (currentBassDb * 60).coerceIn(0, minOf(700, maxMb))
+                                hz <= 180 -> (currentBassDb * 40).coerceIn(0, minOf(480, maxMb))
+                                hz <= 350 -> (currentBassDb * 15).coerceIn(0, minOf(200, maxMb))
+                                else -> if (currentBassDb >= 6) -100.coerceAtLeast(minMb) else 0
+                            }
+                        } else {
+                            if (hz <= 160) (currentBassDb * 100).coerceIn(minMb, 0) else 0
+                        }
+                        setBandLevel(bandIdx, targetMb.coerceIn(minMb, maxMb).toShort())
+                    }
+                    enabled = true
                 }
+            } else {
+                equalizer?.enabled = false
             }
         } catch (_: Exception) {}
 
+        // True Hardware Bypass: PresetReverb degrades stereo clarity if active near 0
+        val reverbActive = currentReverb > 0.02f
         try {
-            if (presetReverb == null) presetReverb = PresetReverb(0, sessionId)
-            presetReverb?.apply {
-                enabled = currentReverb > 0.05f
-                preset = when {
-                    currentReverb > 0.7f -> PresetReverb.PRESET_LARGEHALL
-                    currentReverb > 0.35f -> PresetReverb.PRESET_MEDIUMHALL
-                    currentReverb > 0.05f -> PresetReverb.PRESET_SMALLROOM
-                    else -> PresetReverb.PRESET_NONE
+            if (reverbActive) {
+                if (presetReverb == null) presetReverb = PresetReverb(0, sessionId)
+                presetReverb?.apply {
+                    preset = when {
+                        currentReverb > 0.7f -> PresetReverb.PRESET_LARGEHALL
+                        currentReverb > 0.35f -> PresetReverb.PRESET_MEDIUMHALL
+                        else -> PresetReverb.PRESET_SMALLROOM
+                    }
+                    enabled = true
                 }
+            } else {
+                presetReverb?.preset = PresetReverb.PRESET_NONE
+                presetReverb?.enabled = false
             }
         } catch (_: Exception) {}
 
+        // True Hardware Bypass for Virtualizer
+        val widthActive = currentWidth > 0.02f
         try {
-            if (virtualizer == null && currentWidth > 0.02f) virtualizer = Virtualizer(0, sessionId)
-            virtualizer?.apply {
-                enabled = currentWidth > 0.02f
-                if (strengthSupported) {
-                    setStrength((currentWidth * 1000f).toInt().coerceIn(0, 1000).toShort())
+            if (widthActive) {
+                if (virtualizer == null) virtualizer = Virtualizer(0, sessionId)
+                virtualizer?.apply {
+                    if (strengthSupported) {
+                        setStrength((currentWidth * 900f).toInt().coerceIn(0, 950).toShort())
+                    }
+                    enabled = true
                 }
+            } else {
+                virtualizer?.enabled = false
             }
         } catch (_: Exception) {}
     }
@@ -895,13 +991,18 @@ class RyotunesAudioService : Service() {
         virtualizer = null
     }
 
-    private fun emitState(ended: Boolean = false) {
+    private fun emitPlaybackStateNow(ended: Boolean = false, isPlayingOverride: Boolean? = null) {
+        emitState(ended = ended, isPlayingOverride = isPlayingOverride)
+    }
+
+    private fun emitState(ended: Boolean = false, isPlayingOverride: Boolean? = null) {
         val track = queue.getOrNull(currentIndex)
         val posSec = player.currentPosition.coerceAtLeast(0L) / 1000.0
         val durSec = if (player.duration > 0) player.duration / 1000.0 else (track?.durationSec ?: 0.0)
+        val effectivePlaying = isPlayingOverride ?: player.isPlaying
         listener?.onPlaybackStateChanged(
             track?.id,
-            player.isPlaying,
+            effectivePlaying,
             posSec,
             durSec,
             currentIndex,

@@ -267,6 +267,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const prefetchInFlightRef = useRef<Set<string>>(new Set());
   const expectedTrackIdRef = useRef<string | null>(null);
   const expectedTrackUntilRef = useRef<number>(0);
+  const expectedPlayToggleRef = useRef<{ target: boolean; until: number } | null>(null);
   const lyricsAttemptedRef = useRef<Set<string>>(new Set());
 
   const trackMap = useMemo(() => {
@@ -548,7 +549,15 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           expectedTrackIdRef.current = null;
         }
 
-        setIsPlaying(ev.isPlaying);
+        const pendingToggle = expectedPlayToggleRef.current;
+        if (pendingToggle) {
+          if (ev.isPlaying === pendingToggle.target || Date.now() >= pendingToggle.until) {
+            expectedPlayToggleRef.current = null;
+            setIsPlaying(ev.isPlaying);
+          }
+        } else {
+          setIsPlaying(ev.isPlaying);
+        }
         setPosition(ev.position);
         if (ev.duration > 0) setDuration(ev.duration);
 
@@ -1112,6 +1121,9 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const togglePlay = useCallback(() => {
     hasUserActionRef.current = true;
     if (usingNativePlayer) {
+      const nextState = !isPlayingRef.current;
+      expectedPlayToggleRef.current = { target: nextState, until: Date.now() + 450 };
+      setIsPlaying((prev) => !prev);
       playbackModeRef.current = 'native';
       audioElRef.current?.pause();
       RyotunesNativeMedia.togglePlay().catch(() => {});
@@ -1124,9 +1136,10 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       return;
     }
     if (isPlaying && audio) {
-      audio.pause();
       setIsPlaying(false);
+      audio.pause();
     } else {
+      setIsPlaying(true);
       startWebTrackSync(currentTrack);
     }
   }, [usingNativePlayer, currentTrack, isPlaying, queue, activateTrackInQueue, startWebTrackSync]);

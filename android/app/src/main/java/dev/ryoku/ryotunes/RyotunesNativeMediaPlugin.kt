@@ -395,9 +395,17 @@ class RyotunesNativeMediaPlugin : Plugin(), RyotunesAudioService.ServiceListener
 
     @PluginMethod
     fun play(call: PluginCall) {
+        val boundSvc = audioService
+        if (serviceBound && boundSvc != null) {
+            runOnService(call) { svc ->
+                svc?.playImmediate()
+                call.resolve()
+            }
+            return
+        }
         runOnService(call) { svc ->
             ensureServiceBound()
-            svc?.play()
+            svc?.playImmediate()
             call.resolve()
         }
     }
@@ -405,16 +413,24 @@ class RyotunesNativeMediaPlugin : Plugin(), RyotunesAudioService.ServiceListener
     @PluginMethod
     fun pause(call: PluginCall) {
         runOnService(call) { svc ->
-            svc?.pause()
+            svc?.pauseImmediate()
             call.resolve()
         }
     }
 
     @PluginMethod
     fun togglePlay(call: PluginCall) {
+        val boundSvc = audioService
+        if (serviceBound && boundSvc != null) {
+            runOnService(call) { svc ->
+                svc?.togglePlayImmediate()
+                call.resolve()
+            }
+            return
+        }
         runOnService(call) { svc ->
             ensureServiceBound()
-            svc?.togglePlay()
+            svc?.togglePlayImmediate()
             call.resolve()
         }
     }

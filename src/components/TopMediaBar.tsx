@@ -4,9 +4,10 @@ import { Icon } from '../icons/Icon';
 import { useTheme } from '../theme/ThemeContext';
 
 interface TopMediaBarProps {
-  viewMode: 'bento' | 'library' | 'visualizer' | 'nowPlaying';
+  viewMode: 'bento' | 'library' | 'visualizer' | 'nowPlaying' | 'stage' | 'explore' | 'studio';
   onToggleBentoOrViz: () => void;
   onToggleLibrary: () => void;
+  onOpenSound?: () => void;
 }
 
 /**
@@ -17,6 +18,7 @@ export const TopMediaBar: React.FC<TopMediaBarProps> = ({
   viewMode,
   onToggleBentoOrViz,
   onToggleLibrary,
+  onOpenSound,
 }) => {
   const { currentTrack, isPlaying, position, duration, volume, muted, triggerOsd } = useAudio();
   const { bentoTokens, bentoThemeMode } = useTheme();
@@ -72,11 +74,11 @@ export const TopMediaBar: React.FC<TopMediaBarProps> = ({
           height: 32,
           borderRadius: 999,
           border:
-            viewMode === 'bento' || viewMode === 'visualizer'
+            viewMode === 'bento' || viewMode === 'visualizer' || viewMode === 'stage'
               ? `1px solid ${bentoTokens.accent}`
               : `1px solid ${bentoTokens.borderDim}`,
           backgroundColor:
-            viewMode === 'bento' || viewMode === 'visualizer'
+            viewMode === 'bento' || viewMode === 'visualizer' || viewMode === 'stage'
               ? bentoTokens.glowSoft
               : bentoTokens.bgSurface,
           display: 'flex',
@@ -180,15 +182,15 @@ export const TopMediaBar: React.FC<TopMediaBarProps> = ({
 
       <button
         type="button"
-        onClick={onToggleLibrary}
+        onClick={onOpenSound || onToggleLibrary}
         className="ryo-pressable"
         style={{
           height: 32,
           padding: '0 10px',
           borderRadius: 999,
           border: `1px solid ${bentoTokens.accent}`,
-          backgroundColor: viewMode === 'library' ? bentoTokens.accent : bentoTokens.bgElevated,
-          color: viewMode === 'library' ? '#FFFFFF' : bentoTokens.ink,
+          backgroundColor: onOpenSound ? bentoTokens.bgElevated : viewMode === 'library' ? bentoTokens.accent : bentoTokens.bgElevated,
+          color: onOpenSound ? bentoTokens.ink : viewMode === 'library' ? '#FFFFFF' : bentoTokens.ink,
           display: 'flex',
           alignItems: 'center',
           gap: 4,
@@ -196,9 +198,13 @@ export const TopMediaBar: React.FC<TopMediaBarProps> = ({
           flexShrink: 0,
         }}
       >
-        <Icon name="library" size={13} color={viewMode === 'library' ? '#FFFFFF' : bentoTokens.accentLavender} />
+        <Icon
+          name={onOpenSound ? 'sound' : 'library'}
+          size={13}
+          color={onOpenSound ? bentoTokens.accentLavender : viewMode === 'library' ? '#FFFFFF' : bentoTokens.accentLavender}
+        />
         <span style={{ fontFamily: bentoTokens.fontMono, fontSize: 10 }}>
-          {viewMode === 'library' ? 'BENTO' : 'LIB'}
+          {onOpenSound ? 'FX' : viewMode === 'library' ? 'BENTO' : 'LIB'}
         </span>
       </button>
     </header>
