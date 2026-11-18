@@ -1,9 +1,9 @@
 import React from 'react';
 import { useAudio } from '../audio/AudioContextProvider';
-import { sampleBandInterpolated } from '../audio/spectrumUtils';
 import { VisualizerStyle } from '../audio/types';
 import { useTheme } from '../theme/ThemeContext';
 import { DotMatrixGrid } from './DotMatrixGrid';
+import { DotMatrixSpectrum } from './DotMatrixSpectrum';
 import { InstrumentBrackets } from './InstrumentBrackets';
 import { SpectrumCanvas } from './SpectrumCanvas';
 import { WaveVisualizerCanvas } from './WaveVisualizerCanvas';
@@ -14,14 +14,15 @@ interface FullVisualizerCardProps {
 }
 
 /**
- * Port of ~/.config/quickshell/ii/modules/ii/background/widgets/visualizer/VisualizerWidget.qml:
- * Supports Dot-Matrix 38x10, Spectrum Wave, and Spectrum Bars with fractional gapless FFT mapping.
+ * 60-FPS Ref-Driven Visualizer Card:
+ * Renders Dot-Matrix 38x10, Spectrum Wave, or Spectrum Bars entirely inside Canvas
+ * via AudioContext ref subscriptions with 0 React re-renders.
  */
 export const FullVisualizerCard: React.FC<FullVisualizerCardProps> = ({
   tall = false,
   embedded = false,
 }) => {
-  const { spectrumPoints, isPlaying } = useAudio();
+  const { isPlaying } = useAudio();
   const { bentoTokens, bentoThemeMode, visualizerStyle, setVisualizerStyle, decor } = useTheme();
 
   const barCount = 38;
@@ -33,19 +34,19 @@ export const FullVisualizerCard: React.FC<FullVisualizerCardProps> = ({
     setVisualizerStyle(order[(idx + 1) % order.length]);
   };
 
-  const vizHeight = embedded ? 148 : tall ? 154 : 70;
+  const vizHeight = embedded ? 186 : tall ? 154 : 70;
 
   return (
     <section
       style={{
         position: 'relative',
         width: '100%',
-        height: embedded ? 204 : tall ? 210 : 126,
+        height: embedded ? 248 : tall ? 210 : 126,
         borderRadius: embedded ? Math.min(12, bentoTokens.radiusCard) : bentoTokens.radiusCard,
         backgroundColor: bentoThemeMode === 'nothing' ? 'rgba(10, 10, 12, 0.92)' : bentoTokens.bgSurface,
         border: `1px solid ${isPlaying ? bentoTokens.accent : bentoTokens.borderDim}`,
         overflow: 'hidden',
-        padding: embedded ? 10 : 14,
+        padding: embedded ? 12 : 14,
         display: 'flex',
         flexDirection: 'column',
         gap: 8,
@@ -69,7 +70,7 @@ export const FullVisualizerCard: React.FC<FullVisualizerCardProps> = ({
           }}
         />
         <span style={{ fontFamily: bentoTokens.fontMono, fontSize: 10.5, color: bentoTokens.ink, letterSpacing: '0.06em' }}>
-          {isPlaying ? 'GLYPH MATRIX // 38CH LIVE FFT' : 'GLYPH MATRIX // STANDBY'}
+          {isPlaying ? 'GLYPH MATRIX // 38CH 60FPS FFT' : 'GLYPH MATRIX // STANDBY'}
         </span>
 
         <div style={{ flex: 1 }} />
@@ -102,14 +103,12 @@ export const FullVisualizerCard: React.FC<FullVisualizerCardProps> = ({
       <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
         {visualizerStyle === 'spectrum-wave' ? (
           <WaveVisualizerCanvas
-            points={spectrumPoints}
             live={isPlaying}
             color={bentoTokens.glowMedium}
             blurPx={1}
           />
         ) : visualizerStyle === 'spectrum-bars' ? (
           <SpectrumCanvas
-            points={spectrumPoints}
             live={isPlaying}
             height={vizHeight}
             forceMode="bars"
@@ -117,44 +116,18 @@ export const FullVisualizerCard: React.FC<FullVisualizerCardProps> = ({
             inkOverride={bentoTokens.ink}
           />
         ) : (
-          <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'stretch', gap: 2.5 }}>
-            {Array.from({ length: barCount }).map((_, colIdx) => {
-              const rawVal =
-                isPlaying && spectrumPoints.length > 0
-                  ? sampleBandInterpolated(spectrumPoints, colIdx, barCount, 1000)
-                  : 0;
-              const litDots = rawVal > 0.01 ? Math.max(1, Math.round(Math.pow(rawVal, 0.78) * dotRows)) : 0;
-
-              return (
-                <div key={colIdx} style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 2 }}>
-                  {Array.from({ length: dotRows }).map((__, rowIdx) => {
-                    const rowFromBottom = dotRows - 1 - rowIdx;
-                    const isLit = rowFromBottom < litDots;
-                    const isPeak = rowFromBottom === litDots - 1 && litDots > 0;
-                    const dotColor = isPeak
-                      ? bentoTokens.accentLavender
-                      : isLit
-                      ? rowFromBottom >= dotRows - 2
-                        ? bentoTokens.accent
-                        : bentoTokens.vizDotBody
-                      : bentoTokens.vizDotUnlit;
-
-                    return (
-                      <div
-                        key={rowIdx}
-                        style={{
-                          flex: 1,
-                          borderRadius: 999,
-                          backgroundColor: dotColor,
-                          opacity: isPeak || isLit ? 0.96 : 0.45,
-                        }}
-                      />
-                    );
-                  })}
-                </div>
-              );
-            })}
-          </div>
+          <DotMatrixSpectrum
+            isPlaying={isPlaying}
+            cols={barCount}
+            rows={dotRows}
+            height="100%"
+            transparent
+            roundDots
+            peakColor={bentoTokens.accentLavender}
+            midColor={bentoTokens.accent}
+            baseColor={bentoTokens.vizDotBody}
+            unlitColor={bentoTokens.vizDotUnlit}
+          />
         )}
       </div>
     </section>

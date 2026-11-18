@@ -20,7 +20,7 @@ import { SettingsPage } from './pages/SettingsPage';
 import { ThemeProvider, useTheme } from './theme/ThemeContext';
 
 const RyotunesShell: React.FC = () => {
-  const { currentTrack, importLocalFiles, syncDeviceLibrary, isNativeAndroid, triggerOsd } = useAudio();
+  const { currentTrack, importLocalFiles, syncDeviceLibrary, isNativeAndroid } = useAudio();
   const { bentoTokens } = useTheme();
   const [activeTab, setActiveTab] = useState<MainTab>('stage');
   const [stageCenterMode, setStageCenterMode] = useState<StageCenterMode>('art');
@@ -81,33 +81,32 @@ const RyotunesShell: React.FC = () => {
         }}
       />
 
-      {/* Persistent Top Media.qml Capsule Bar */}
-      <TopMediaBar
-        viewMode={activeTab}
-        onToggleBentoOrViz={() => {
-          if (activeTab !== 'stage') {
-            setActiveTab('stage');
-          } else {
-            setStageCenterMode((m) => (m === 'spectrum' ? 'art' : 'spectrum'));
-          }
-        }}
-        onToggleLibrary={() => setActiveTab((t) => (t === 'library' ? 'stage' : 'library'))}
-        onOpenSound={() => setSoundOpen(true)}
-      />
+      {/* Persistent Top Media.qml Capsule Bar (shown outside STAGE to avoid duplicating active track info) */}
+      {activeTab !== 'stage' && (
+        <TopMediaBar
+          viewMode={activeTab}
+          onToggleBentoOrViz={() => setActiveTab('stage')}
+          onToggleLibrary={() => setActiveTab((t) => (t === 'library' ? 'stage' : 'library'))}
+          onOpenSound={() => setSoundOpen(true)}
+        />
+      )}
 
-      {/* TAB 01 · STAGE: Unified Bento Console (Zero Duplicate Visualizers) */}
+      {/* TAB 01 · STAGE: Unified Flagship Mobile Console */}
       {activeTab === 'stage' && (
         <main
           style={{
             flex: 1,
             minHeight: 0,
             overflowY: 'auto',
-            padding: '12px 14px 14px',
+            paddingTop: 'calc(var(--safe-top) + 10px)',
+            paddingLeft: 'calc(var(--safe-left) + 14px)',
+            paddingRight: 'calc(var(--safe-right) + 14px)',
+            paddingBottom: 10,
             display: 'flex',
             flexDirection: 'column',
             alignItems: 'center',
             justifyContent: 'center',
-            gap: 12,
+            gap: 10,
             background: bentoTokens.gradientBg,
           }}
         >
@@ -117,7 +116,8 @@ const RyotunesShell: React.FC = () => {
               maxWidth: 460,
               display: 'flex',
               flexDirection: 'column',
-              gap: 12,
+              alignItems: 'center',
+              gap: 10,
             }}
           >
             <BentoPlayerCard
@@ -128,102 +128,31 @@ const RyotunesShell: React.FC = () => {
                 setActiveTab('library');
               }}
               onOpenNowPlaying={() => setNowPlayingOpen(true)}
+              onOpenSound={() => setSoundOpen(true)}
+              onOpenStudio={() => setActiveTab('studio')}
             />
 
-            {/* Quick Instrument Controls Strip */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
-              <button
-                type="button"
-                onClick={() => (isNativeAndroid ? syncDeviceLibrary(true) : quickFileRef.current?.click())}
-                className="ryo-pressable"
-                style={{
-                  height: 44,
-                  borderRadius: 12,
-                  backgroundColor: bentoTokens.bgSurface,
-                  border: `1px solid ${bentoTokens.borderDim}`,
-                  display: 'flex',
-                  flexDirection: 'column',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: 3,
-                  cursor: 'pointer',
-                }}
-              >
-                <Icon name="folder" size={14} color={bentoTokens.accentLavender} />
-                <span style={{ fontFamily: bentoTokens.fontMono, fontSize: 8.5, color: bentoTokens.ink }}>
-                  {isNativeAndroid ? 'SYNC LOCAL' : 'LOAD AUDIO'}
-                </span>
-              </button>
-
-              <button
-                type="button"
-                onClick={triggerOsd}
-                className="ryo-pressable"
-                style={{
-                  height: 44,
-                  borderRadius: 12,
-                  backgroundColor: bentoTokens.bgSurface,
-                  border: `1px solid ${bentoTokens.borderDim}`,
-                  display: 'flex',
-                  flexDirection: 'column',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: 3,
-                  cursor: 'pointer',
-                }}
-              >
-                <Icon name="volume" size={14} color={bentoTokens.accentLavender} />
-                <span style={{ fontFamily: bentoTokens.fontMono, fontSize: 8.5, color: bentoTokens.ink }}>
-                  VOL OSD
-                </span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setSoundOpen(true)}
-                className="ryo-pressable"
-                style={{
-                  height: 44,
-                  borderRadius: 12,
-                  backgroundColor: bentoTokens.bgSurface,
-                  border: `1px solid ${bentoTokens.borderDim}`,
-                  display: 'flex',
-                  flexDirection: 'column',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: 3,
-                  cursor: 'pointer',
-                }}
-              >
-                <Icon name="sound" size={14} color={bentoTokens.accentLavender} />
-                <span style={{ fontFamily: bentoTokens.fontMono, fontSize: 8.5, color: bentoTokens.ink }}>
-                  SOUND FX
-                </span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setNowPlayingOpen(true)}
-                className="ryo-pressable"
-                style={{
-                  height: 44,
-                  borderRadius: 12,
-                  backgroundColor: bentoTokens.bgSurface,
-                  border: `1px solid ${bentoTokens.borderDim}`,
-                  display: 'flex',
-                  flexDirection: 'column',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: 3,
-                  cursor: 'pointer',
-                }}
-              >
-                <Icon name="expand" size={14} color={bentoTokens.accentLavender} />
-                <span style={{ fontFamily: bentoTokens.fontMono, fontSize: 8.5, color: bentoTokens.ink }}>
-                  FULL VIEW
-                </span>
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={() => (isNativeAndroid ? syncDeviceLibrary(true) : quickFileRef.current?.click())}
+              className="ryo-pressable"
+              style={{
+                height: 30,
+                padding: '0 14px',
+                borderRadius: 999,
+                backgroundColor: bentoTokens.bgSurface,
+                border: `1px solid ${bentoTokens.borderDim}`,
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                cursor: 'pointer',
+              }}
+            >
+              <Icon name="folder" size={12} color={bentoTokens.accentLavender} />
+              <span style={{ fontFamily: bentoTokens.fontMono, fontSize: 9, color: bentoTokens.muted }}>
+                {isNativeAndroid ? 'SYNC DEVICE LIBRARY' : 'IMPORT LOCAL AUDIO'}
+              </span>
+            </button>
           </div>
         </main>
       )}

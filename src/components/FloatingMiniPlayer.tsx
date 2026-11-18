@@ -14,7 +14,7 @@ interface FloatingMiniPlayerProps {
  * and instant Play/Pause + Next controls. Tapping the capsule returns to 01 · STAGE.
  */
 export const FloatingMiniPlayer: React.FC<FloatingMiniPlayerProps> = ({ onOpenStage }) => {
-  const { currentTrack, isPlaying, position, duration, spectrumPoints, togglePlay, next } = useAudio();
+  const { currentTrack, isPlaying, position, duration, togglePlay, next } = useAudio();
   const { bentoTokens } = useTheme();
 
   if (!currentTrack) return null;
@@ -135,7 +135,6 @@ export const FloatingMiniPlayer: React.FC<FloatingMiniPlayerProps> = ({ onOpenSt
           </div>
           <div style={{ width: 96 }}>
             <DotMatrixSpectrum
-              points={spectrumPoints}
               isPlaying={isPlaying}
               cols={14}
               rows={3}

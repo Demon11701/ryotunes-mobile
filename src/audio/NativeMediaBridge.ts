@@ -45,11 +45,14 @@ export interface NativeResolvedStream {
 
 export interface NativeOfflineTrackItem {
   id: string;
+  originalId?: string;
   title: string;
   artist: string;
   album: string;
   duration: number;
   src: string;
+  contentUri?: string;
+  localPath?: string;
   mimeType?: string;
   artworkPath?: string;
   format?: string;
@@ -177,13 +180,16 @@ export function mapNativeScanTracks(raw: NativeScanResult): Track[] {
 }
 
 export function mapNativeOfflineTrack(t: NativeOfflineTrackItem): Track {
+  const playbackUri = t.contentUri || t.src;
   return {
     id: t.id,
+    originalId: t.originalId || t.id,
     title: t.title,
     artist: t.artist,
     album: t.album,
     duration: t.duration,
-    src: t.src,
+    src: playbackUri,
+    mimeType: t.mimeType,
     artwork: convertNativeArtwork(t.artworkPath),
     artworkPath: t.artworkPath,
     format: t.format || 'OFFLINE',
@@ -191,7 +197,7 @@ export function mapNativeOfflineTrack(t: NativeOfflineTrackItem): Track {
     provider: t.provider,
     offline: true,
     offlineSizeBytes: t.sizeBytes,
-    offlinePath: t.src,
+    offlinePath: t.localPath || playbackUri,
     waveform: t.waveform,
     addedAt: Date.now(),
   };

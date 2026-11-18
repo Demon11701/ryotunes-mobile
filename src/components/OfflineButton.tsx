@@ -13,10 +13,10 @@ interface OfflineButtonProps {
  * saves online audio + cover art to local device/IndexedDB for offline playback.
  */
 export const OfflineButton: React.FC<OfflineButtonProps> = ({ track, compact = false }) => {
-  const { offlineTracks, downloadProgress, downloadTrack, removeOffline } = useAudio();
+  const { isTrackOffline, downloadProgress, downloadTrack, removeOffline } = useAudio();
   if (track.source === 'local') return null;
 
-  const isSaved = track.offline || offlineTracks.some((o) => o.id === track.id);
+  const isSaved = Boolean(track.offline || isTrackOffline(track.id));
   const progress = downloadProgress[track.id];
   const isDownloading = progress !== undefined && progress > 0 && progress < 100;
 

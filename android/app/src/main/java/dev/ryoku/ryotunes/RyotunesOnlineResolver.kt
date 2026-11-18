@@ -118,7 +118,14 @@ object RyotunesOnlineResolver {
 
         return when {
             id.startsWith("yt:") -> {
-                runCatching { resolveYoutubeAudio(id.removePrefix("yt:"), quality) }.getOrElse { ytErr ->
+                val vid = id.removePrefix("yt:")
+                runCatching {
+                    val res = resolveYoutubeAudio(vid, quality, preferProgressiveForDownload)
+                    if (preferProgressiveForDownload && isHlsStream(res)) {
+                        throw IllegalStateException("Skipping HLS manifest for offline download")
+                    }
+                    res
+                }.getOrElse { ytErr ->
                     if (title.isNotBlank()) {
                         val sc = runCatching { searchSoundCloud("$artist $title".trim()) }.getOrDefault(emptyList())
                         val scId = sc.firstOrNull()?.optString("remoteId", "") ?: ""
@@ -135,15 +142,23 @@ object RyotunesOnlineResolver {
                 val ytMatches = runCatching { searchYouTubeMusic(q) }.getOrDefault(emptyList())
                 val vid = ytMatches.firstOrNull()?.optString("remoteId", "") ?: ""
                 if (vid.isNotEmpty()) {
-                    val ytRes = runCatching { resolveYoutubeAudio(vid, quality) }.getOrNull()
+                    val ytRes = runCatching {
+                        val res = resolveYoutubeAudio(vid, quality, preferProgressiveForDownload)
+                        if (preferProgressiveForDownload && isHlsStream(res)) null else res
+                    }.getOrNull()
                     if (ytRes != null) return ytRes
                 }
                 val scMatches = runCatching { searchSoundCloud(q) }.getOrDefault(emptyList())
                 val scId = scMatches.firstOrNull()?.optString("remoteId", "") ?: ""
                 if (scId.isNotEmpty()) return resolveSoundCloudAudio(scId, quality, preferProgressiveForDownload)
-                throw IllegalStateException("No matching stream found for \"$title\"")
+                throw IllegalStateException("No matching progressive stream found for \"$title\"")
             }
         }
+    }
+
+    private fun isHlsStream(stream: ResolvedStream): Boolean {
+        return stream.mimeType.contains("mpegURL", ignoreCase = true) ||
+            stream.streamUrl.contains(".m3u8", ignoreCase = true)
     }
 
     fun downloadOffline(
@@ -165,7 +180,8 @@ object RyotunesOnlineResolver {
         val initialWaveform = jsonArrayToIntList(trackJson.optJSONArray("waveform"))
 
         onProgress(10)
-        val resolved = resolveStream(
+        val candidates = mutableListOf<ResolvedStream>()
+        val primary = resolveStream(
             context = context,
             id = id,
             provider = provider,
@@ -174,20 +190,65 @@ object RyotunesOnlineResolver {
             quality = quality,
             preferProgressiveForDownload = true
         )
-        if (resolved.durationSec > 0) duration = resolved.durationSec
-        val waveform = if (resolved.waveform.isNotEmpty()) resolved.waveform else initialWaveform
+        if (!isHlsStream(primary)) {
+            candidates.add(primary)
+        }
 
-        onProgress(22)
+        // Prepare IOS fallback or SoundCloud progressive fallback if primary download rejects
+        val ytVidFallback = if (id.startsWith("yt:")) id.removePrefix("yt:") else null
+        if (ytVidFallback != null) {
+            runCatching {
+                val iosRes = resolveYoutubeAudio(ytVidFallback, quality, preferProgressiveForDownload = true, skipVisionOs = true)
+                if (!isHlsStream(iosRes) && candidates.none { it.streamUrl == iosRes.streamUrl }) {
+                    candidates.add(iosRes)
+                }
+            }
+        }
+        if (candidates.isEmpty()) {
+            val sc = runCatching { searchSoundCloud("$artist $title".trim()) }.getOrDefault(emptyList())
+            val scId = sc.firstOrNull()?.optString("remoteId", "") ?: ""
+            if (scId.isNotEmpty()) {
+                val scRes = resolveSoundCloudAudio(scId, quality, preferProgressiveForDownload = true)
+                if (!isHlsStream(scRes)) candidates.add(scRes)
+            }
+        }
+        if (candidates.isEmpty()) {
+            throw IllegalStateException("No progressive offline stream available for \"$title\"")
+        }
+
         val offlineDir = File(context.filesDir, "ryotunes_offline").apply { mkdirs() }
         val safeKey = id.replace(Regex("[^a-zA-Z0-9._-]"), "_")
-        val ext = when {
-            resolved.mimeType.contains("mpeg") -> "mp3"
-            resolved.mimeType.contains("webm") -> "webm"
-            else -> "m4a"
-        }
-        val outFile = File(offlineDir, "$safeKey.$ext")
 
-        downloadUrlToFile(resolved.streamUrl, outFile, onProgress)
+        var downloadedStream: ResolvedStream? = null
+        var downloadedFile: File? = null
+        var lastError: Throwable? = null
+
+        for (candidate in candidates) {
+            if (candidate.durationSec > 0) duration = candidate.durationSec
+            val ext = when {
+                candidate.mimeType.contains("mpeg") -> "mp3"
+                candidate.mimeType.contains("webm") -> "webm"
+                candidate.mimeType.contains("ogg") -> "ogg"
+                else -> "m4a"
+            }
+            val outFile = File(offlineDir, "$safeKey.$ext")
+            onProgress(22)
+            try {
+                downloadUrlToFile(candidate.streamUrl, outFile, onProgress)
+                if (outFile.exists() && outFile.length() > 32_768L) {
+                    downloadedStream = candidate
+                    downloadedFile = outFile
+                    break
+                }
+            } catch (err: Throwable) {
+                lastError = err
+                runCatching { outFile.delete() }
+            }
+        }
+
+        val finalStream = downloadedStream ?: throw (lastError ?: IllegalStateException("Offline download failed"))
+        val outFile = downloadedFile ?: throw IllegalStateException("Offline file missing")
+        val waveform = if (finalStream.waveform.isNotEmpty()) finalStream.waveform else initialWaveform
 
         var localArtPath: String? = null
         if (artUrl.startsWith("http")) {
@@ -201,13 +262,19 @@ object RyotunesOnlineResolver {
             }
         }
 
+        val fileUriStr = Uri.fromFile(outFile).toString()
         val savedObj = JSObject().apply {
             put("id", id)
+            put("originalId", id)
             put("title", title)
             put("artist", artist)
             put("album", album)
             put("duration", duration)
-            put("src", "file://${outFile.absolutePath}")
+            put("src", fileUriStr)
+            put("contentUri", fileUriStr)
+            put("localPath", outFile.absolutePath)
+            put("mimeType", finalStream.mimeType)
+            put("offline", true)
             if (localArtPath != null) put("artworkPath", localArtPath)
             put("format", format)
             put("provider", provider)
@@ -233,11 +300,15 @@ object RyotunesOnlineResolver {
 
         for (i in 0 until srcArr.length()) {
             val obj = srcArr.optJSONObject(i) ?: continue
-            val filePath = obj.optString("src", "").removePrefix("file://")
+            val filePath = obj.optString("localPath", "").ifBlank {
+                obj.optString("src", "").removePrefix("file://")
+            }
             val f = File(filePath)
-            if (f.exists() && f.length() > 512L) {
+            if (f.exists() && f.length() > 32_768L) {
                 valid.put(obj)
                 out.put(JSObject(obj.toString()))
+            } else {
+                runCatching { f.delete() }
             }
         }
         if (valid.length() != srcArr.length()) {
@@ -252,8 +323,8 @@ object RyotunesOnlineResolver {
         val kept = JSONArray()
         for (i in 0 until srcArr.length()) {
             val obj = srcArr.optJSONObject(i) ?: continue
-            if (obj.optString("id", "") == trackId) {
-                val fPath = obj.optString("src", "").removePrefix("file://")
+            if (obj.optString("id", "") == trackId || obj.optString("originalId", "") == trackId) {
+                val fPath = obj.optString("localPath", "").ifBlank { obj.optString("src", "").removePrefix("file://") }
                 runCatching { File(fPath).delete() }
                 val artPath = obj.optString("artworkPath", "")
                 if (artPath.isNotEmpty()) runCatching { File(artPath).delete() }
@@ -436,14 +507,21 @@ object RyotunesOnlineResolver {
         return key to vd
     }
 
-    private fun pickAudioFormatStream(json: JSONObject, quality: String): ResolvedStream? {
+    private fun pickAudioFormatStream(
+        json: JSONObject,
+        quality: String,
+        preferProgressiveForDownload: Boolean = false
+    ): ResolvedStream? {
         val fmts = json.optJSONObject("streamingData")?.optJSONArray("adaptiveFormats") ?: JSONArray()
         val rawAudioList = mutableListOf<JSONObject>()
         for (i in 0 until fmts.length()) {
             val f = fmts.optJSONObject(i) ?: continue
             val mime = f.optString("mimeType", "")
             val url = f.optString("url", "")
-            if (url.isNotEmpty() && mime.startsWith("audio/")) {
+            if (url.isNotEmpty() && mime.startsWith("audio/") &&
+                !url.contains(".m3u8", ignoreCase = true) &&
+                !mime.contains("mpegURL", ignoreCase = true)
+            ) {
                 rawAudioList.add(f)
             }
         }
@@ -456,13 +534,24 @@ object RyotunesOnlineResolver {
             pool.minByOrNull { it.optInt("bitrate", Int.MAX_VALUE) }
         } else {
             // Hi-Fi priority: itag 251 (WebM Opus ~160kbps @ 48kHz) -> itag 141 (256kbps AAC) -> itag 140 (128kbps AAC-LC) -> max bitrate
+            // Note: itag 140/251 are direct progressive audio streams suitable for bounded chunked download
             pool.sortedWith(
                 compareByDescending<JSONObject> { f ->
-                    when (f.optInt("itag", -1)) {
-                        251 -> 4
-                        141 -> 3
-                        140 -> 2
-                        else -> if (f.optString("mimeType", "").contains("opus")) 1 else 0
+                    val itag = f.optInt("itag", -1)
+                    if (preferProgressiveForDownload) {
+                        when (itag) {
+                            140 -> 5
+                            251 -> 4
+                            141 -> 3
+                            else -> 0
+                        }
+                    } else {
+                        when (itag) {
+                            251 -> 4
+                            141 -> 3
+                            140 -> 2
+                            else -> if (f.optString("mimeType", "").contains("opus")) 1 else 0
+                        }
                     }
                 }.thenByDescending { it.optInt("bitrate", 0) }
             ).firstOrNull()
@@ -477,46 +566,53 @@ object RyotunesOnlineResolver {
         )
     }
 
-    private fun resolveYoutubeAudio(videoId: String, quality: String): ResolvedStream {
-        // Primary: VISIONOS client returns full un-throttled audio/mp4 & audio/webm streams (200 OK full file + free seeking)
-        val voResult = runCatching {
-            val (apiKey, visitorData) = ensureYtClientConfig(videoId)
-            val payload = JSONObject().apply {
-                put("context", JSONObject().apply {
-                    put("client", JSONObject().apply {
-                        put("clientName", "VISIONOS")
-                        put("clientVersion", "1.02")
-                        put("deviceMake", "Apple")
-                        put("deviceModel", "RealityDevice17,1")
-                        put("userAgent", VISIONOS_UA)
-                        put("osName", "visionOS")
-                        put("osVersion", "26.5.23O471")
-                        put("hl", "en")
-                        put("gl", "US")
-                        if (visitorData.isNotEmpty()) put("visitorData", visitorData)
+    private fun resolveYoutubeAudio(
+        videoId: String,
+        quality: String,
+        preferProgressiveForDownload: Boolean = false,
+        skipVisionOs: Boolean = false
+    ): ResolvedStream {
+        // Primary: VISIONOS client returns full un-throttled audio/mp4 & audio/webm streams (200 OK / 206 Range)
+        if (!skipVisionOs) {
+            val voResult = runCatching {
+                val (apiKey, visitorData) = ensureYtClientConfig(videoId)
+                val payload = JSONObject().apply {
+                    put("context", JSONObject().apply {
+                        put("client", JSONObject().apply {
+                            put("clientName", "VISIONOS")
+                            put("clientVersion", "1.02")
+                            put("deviceMake", "Apple")
+                            put("deviceModel", "RealityDevice17,1")
+                            put("userAgent", ChunkedGoogleVideoDataSource.UA_VISIONOS)
+                            put("osName", "visionOS")
+                            put("osVersion", "26.5.23O471")
+                            put("hl", "en")
+                            put("gl", "US")
+                            if (visitorData.isNotEmpty()) put("visitorData", visitorData)
+                        })
                     })
-                })
-                put("videoId", videoId)
-                put("contentCheckOk", true)
-                put("racyCheckOk", true)
-            }
-            val endpoint = if (apiKey.isNotEmpty()) {
-                "https://www.youtube.com/youtubei/v1/player?key=$apiKey&prettyPrint=false"
-            } else {
-                "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
-            }
-            val extraHeaders = mutableMapOf(
-                "Origin" to "https://www.youtube.com",
-                "X-YouTube-Client-Name" to "101",
-                "X-YouTube-Client-Version" to "1.02"
-            )
-            if (visitorData.isNotEmpty()) extraHeaders["X-Goog-Visitor-Id"] = visitorData
-            val body = httpPostJson(endpoint, payload.toString(), VISIONOS_UA, extraHeaders)
-            pickAudioFormatStream(JSONObject(body), quality)
-        }.getOrNull()
-        if (voResult != null) return voResult
+                    put("videoId", videoId)
+                    put("contentCheckOk", true)
+                    put("racyCheckOk", true)
+                }
+                val endpoint = if (apiKey.isNotEmpty()) {
+                    "https://www.youtube.com/youtubei/v1/player?key=$apiKey&prettyPrint=false"
+                } else {
+                    "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
+                }
+                val extraHeaders = mutableMapOf(
+                    "Origin" to "https://www.youtube.com",
+                    "X-YouTube-Client-Name" to "101",
+                    "X-YouTube-Client-Version" to "1.02"
+                )
+                if (visitorData.isNotEmpty()) extraHeaders["X-Goog-Visitor-Id"] = visitorData
+                val body = httpPostJson(endpoint, payload.toString(), ChunkedGoogleVideoDataSource.UA_VISIONOS, extraHeaders)
+                pickAudioFormatStream(JSONObject(body), quality, preferProgressiveForDownload)
+            }.getOrNull()
+            if (voResult != null) return voResult
+        }
 
-        // Fallback: IOS client
+        // Fallback: IOS client (bounded 512KB Range downloads supported by ChunkedGoogleVideoDataSource)
         val payload = JSONObject().apply {
             put("context", JSONObject().apply {
                 put("client", JSONObject().apply {
@@ -532,21 +628,23 @@ object RyotunesOnlineResolver {
             })
             put("videoId", videoId)
         }
-        val body = httpPostJson("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", payload.toString(), YT_IOS_UA)
+        val body = httpPostJson("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", payload.toString(), ChunkedGoogleVideoDataSource.UA_IOS)
         val json = JSONObject(body)
-        pickAudioFormatStream(json, quality)?.let { return it }
+        pickAudioFormatStream(json, quality, preferProgressiveForDownload)?.let { return it }
 
-        val hls = json.optJSONObject("streamingData")?.optString("hlsManifestUrl", "") ?: ""
-        val dur = json.optJSONObject("videoDetails")?.optString("lengthSeconds", "0")?.toDoubleOrNull() ?: 0.0
-        if (hls.isNotEmpty()) {
-            return ResolvedStream(
-                streamUrl = hls,
-                mimeType = "application/x-mpegURL",
-                durationSec = dur,
-                waveform = emptyList()
-            )
+        if (!preferProgressiveForDownload) {
+            val hls = json.optJSONObject("streamingData")?.optString("hlsManifestUrl", "") ?: ""
+            val dur = json.optJSONObject("videoDetails")?.optString("lengthSeconds", "0")?.toDoubleOrNull() ?: 0.0
+            if (hls.isNotEmpty()) {
+                return ResolvedStream(
+                    streamUrl = hls,
+                    mimeType = "application/x-mpegURL",
+                    durationSec = dur,
+                    waveform = emptyList()
+                )
+            }
         }
-        throw IllegalStateException("No playable YouTube audio stream")
+        throw IllegalStateException("No playable progressive YouTube audio stream")
     }
 
     private fun resolveSoundCloudAudio(
@@ -658,12 +756,31 @@ object RyotunesOnlineResolver {
         return out
     }
 
+    fun resolveOfflineUriIfSaved(context: Context, id: String): Pair<String, String?>? {
+        val rec = getOfflineRecord(context, id) ?: return null
+        val path = rec.optString("localPath", "").ifBlank {
+            rec.optString("src", "").removePrefix("file://")
+        }
+        val f = File(path)
+        if (!f.exists() || f.length() <= 32_768L) return null
+        val uri = Uri.fromFile(f).toString()
+        val mime = rec.optString("mimeType", "").ifBlank {
+            when {
+                path.endsWith(".webm", ignoreCase = true) -> "audio/webm"
+                path.endsWith(".mp3", ignoreCase = true) -> "audio/mpeg"
+                path.endsWith(".ogg", ignoreCase = true) -> "audio/ogg"
+                else -> "audio/mp4"
+            }
+        }
+        return uri to mime
+    }
+
     private fun getOfflineRecord(context: Context, id: String): JSONObject? {
         val prefs = context.getSharedPreferences(OFFLINE_PREFS, Context.MODE_PRIVATE)
         val arr = runCatching { JSONArray(prefs.getString(OFFLINE_KEY, "[]") ?: "[]") }.getOrDefault(JSONArray())
         for (i in 0 until arr.length()) {
             val obj = arr.optJSONObject(i) ?: continue
-            if (obj.optString("id", "") == id) return obj
+            if (obj.optString("id", "") == id || obj.optString("originalId", "") == id) return obj
         }
         return null
     }
@@ -672,41 +789,58 @@ object RyotunesOnlineResolver {
         val prefs = context.getSharedPreferences(OFFLINE_PREFS, Context.MODE_PRIVATE)
         val arr = runCatching { JSONArray(prefs.getString(OFFLINE_KEY, "[]") ?: "[]") }.getOrDefault(JSONArray())
         val targetId = rec.optString("id", "")
+        val origId = rec.optString("originalId", targetId)
         val next = JSONArray()
         next.put(JSONObject(rec.toString()))
         for (i in 0 until arr.length()) {
             val existing = arr.optJSONObject(i) ?: continue
-            if (existing.optString("id", "") != targetId) next.put(existing)
+            val exId = existing.optString("id", "")
+            val exOrig = existing.optString("originalId", "")
+            if (exId != targetId && exId != origId && exOrig != targetId) next.put(existing)
         }
         prefs.edit().putString(OFFLINE_KEY, next.toString()).apply()
     }
 
     /**
      * Download audio stream via shared Media3 DefaultHttpDataSource + ChunkedGoogleVideoDataSource
-     * so cross-protocol redirects preserve bounded 512KB Range headers and match ExoPlayer streaming.
+     * matching c=VISIONOS / c=IOS User-Agents, cross-protocol redirects and bounded 512KB Range chunks.
      */
     @OptIn(UnstableApi::class)
     private fun downloadUrlToFile(urlStr: String, outFile: File, onProgress: (Int) -> Unit) {
+        val parsedUri = Uri.parse(urlStr)
+        val ua = when {
+            urlStr.contains("c=VISIONOS", ignoreCase = true) -> ChunkedGoogleVideoDataSource.UA_VISIONOS
+            urlStr.contains("c=IOS", ignoreCase = true) -> ChunkedGoogleVideoDataSource.UA_IOS
+            else -> STREAM_UA
+        }
         val httpFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent(STREAM_UA)
+            .setUserAgent(ua)
+            .setConnectTimeoutMs(10_000)
+            .setReadTimeoutMs(15_000)
             .setAllowCrossProtocolRedirects(true)
         val ds = ChunkedGoogleVideoDataSource(httpFactory.createDataSource())
         val spec = DataSpec.Builder()
-            .setUri(Uri.parse(urlStr))
+            .setUri(parsedUri)
             .build()
+        var success = false
         try {
             val openedLen = ds.open(spec)
-            val total = if (openedLen > 0L) openedLen else 1L
+            val clenParam = parsedUri.getQueryParameter("clen")?.toLongOrNull() ?: 0L
+            val total = when {
+                openedLen > 0L -> openedLen
+                clenParam > 0L -> clenParam
+                else -> 1L
+            }
             var downloaded = 0L
             FileOutputStream(outFile).use { fos ->
-                val buf = ByteArray(16 * 1024)
+                val buf = ByteArray(32 * 1024)
                 while (true) {
                     val read = ds.read(buf, 0, buf.size)
                     if (read == C.RESULT_END_OF_INPUT || read < 0) break
                     if (read == 0) continue
                     fos.write(buf, 0, read)
                     downloaded += read
-                    val pct = if (openedLen > 0L) {
+                    val pct = if (total > 1L) {
                         (22 + ((downloaded * 70) / total)).toInt().coerceIn(22, 92)
                     } else {
                         minOf(92, 22 + (downloaded / (32 * 1024)).toInt())
@@ -715,11 +849,15 @@ object RyotunesOnlineResolver {
                 }
                 fos.flush()
             }
-            if (downloaded <= 512L) {
+            if (downloaded <= 32_768L) {
                 throw IllegalStateException("Downloaded audio too small ($downloaded bytes)")
             }
+            success = true
         } finally {
             runCatching { ds.close() }
+            if (!success) {
+                runCatching { outFile.delete() }
+            }
         }
     }
 

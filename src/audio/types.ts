@@ -44,6 +44,7 @@ export interface Track {
   source?: 'local' | 'demo' | 'offline' | ProviderId;
   provider?: ProviderId;
   remoteId?: string; // yt videoId, sc track numeric id, etc.
+  originalId?: string;
   waveform?: number[]; // 240 amplitude samples (0..100) matching Waveform.qml
   offline?: boolean;
   offlineSizeBytes?: number;

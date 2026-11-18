@@ -65,11 +65,11 @@ export const InstrumentScale: React.FC<InstrumentScaleProps> = ({
       onPointerCancel={() => setDragging(false)}
       style={{
         width: '100%',
-        height: height + 10,
-        paddingTop: 5,
-        paddingBottom: 5,
+        height: Math.max(36, height + 20),
+        paddingTop: 10,
+        paddingBottom: 10,
         display: 'flex',
-        alignItems: 'flex-end',
+        alignItems: 'center',
         justifyContent: 'space-between',
         gap: 2,
         cursor: interactive ? 'pointer' : 'default',

@@ -19,19 +19,24 @@ export type StageCenterMode = 'art' | 'lyrics' | 'spectrum' | 'queue';
 interface BentoPlayerCardProps {
   onOpenLibrary: () => void;
   onOpenNowPlaying: () => void;
+  onOpenSound?: () => void;
+  onOpenStudio?: () => void;
   centerMode?: StageCenterMode;
   onChangeCenterMode?: (mode: StageCenterMode) => void;
 }
 
 /**
- * Ergonomic Bento Stage Console:
- * - Supports interactive center switcher: Caratula + 26x5 | Letras Karaoke | Espectro 38CH | Cola
- * - Always-accessible Seekbar (42-div scale / Waveform 240 / Hairline 2px) + Shuffle/Prev/Play/Next/Repeat
- * - Honors dual theming (Fixed Nothing OS Obsidian Purple or Inherit Active Ryotunes Skin)
+ * Flagship Nothing OS x Ryoku Purple Mobile Stage Console:
+ * - Clean header with provider pill & [ ↓ OFFLINE ]
+ * - 4-view stage selector: COVER | LYRICS | SPECTRUM | QUEUE
+ * - Hero centered cover art + Like button + combined 60-FPS Waves & 26x5 FFT LEDs
+ * - Thumb-zone transport deck: 36px scrubber + 48px Play/Pause + Shuffle/Repeat + FX/OSD/Skin strip
  */
 export const BentoPlayerCard: React.FC<BentoPlayerCardProps> = ({
   onOpenLibrary,
   onOpenNowPlaying,
+  onOpenSound,
+  onOpenStudio,
   centerMode: controlledMode,
   onChangeCenterMode,
 }) => {
@@ -42,13 +47,15 @@ export const BentoPlayerCard: React.FC<BentoPlayerCardProps> = ({
     duration,
     shuffle,
     repeat,
-    spectrumPoints,
+    likedIds,
+    toggleLike,
     togglePlay,
     next,
     prev,
     seek,
     toggleShuffle,
     cycleRepeat,
+    triggerOsd,
   } = useAudio();
   const { bentoTokens, bentoThemeMode, visualizerStyle, decor, effectiveWash, blurEnabled } = useTheme();
   const [internalMode, setInternalMode] = useState<StageCenterMode>('art');
@@ -61,6 +68,7 @@ export const BentoPlayerCard: React.FC<BentoPlayerCardProps> = ({
 
   const progress = duration > 0 ? Math.min(1, Math.max(0, position / duration)) : 0;
   const artSrc = currentTrack?.artwork;
+  const isLiked = currentTrack ? likedIds.includes(currentTrack.id) : false;
 
   const scopedSkinVars: React.CSSProperties = {
     '--paper': bentoTokens.bgDeep,
@@ -77,10 +85,10 @@ export const BentoPlayerCard: React.FC<BentoPlayerCardProps> = ({
   } as React.CSSProperties;
 
   const modes: { key: StageCenterMode; label: string }[] = [
-    { key: 'art', label: 'CARÁTULA + 26×5' },
-    { key: 'lyrics', label: 'LETRAS KARAOKE' },
-    { key: 'spectrum', label: 'ESPECTRO 38CH' },
-    { key: 'queue', label: 'COLA' },
+    { key: 'art', label: 'COVER' },
+    { key: 'lyrics', label: 'LYRICS' },
+    { key: 'spectrum', label: 'SPECTRUM' },
+    { key: 'queue', label: 'QUEUE' },
   ];
 
   return (
@@ -92,8 +100,8 @@ export const BentoPlayerCard: React.FC<BentoPlayerCardProps> = ({
         backgroundColor: bentoTokens.bgDeep,
         border: `1px solid ${isPlaying ? bentoTokens.accent : bentoTokens.borderDim}`,
         boxShadow: isPlaying
-          ? `0 14px 36px ${bentoTokens.glowSoft}, 0 4px 12px rgba(0,0,0,0.55)`
-          : '0 8px 24px rgba(0, 0, 0, 0.45)',
+          ? `0 18px 44px ${bentoTokens.glowSoft}, 0 6px 18px rgba(0,0,0,0.6)`
+          : '0 10px 28px rgba(0, 0, 0, 0.45)',
         overflow: 'hidden',
         transition: 'border-color 180ms ease, box-shadow 220ms ease, background-color 220ms ease',
       }}
@@ -110,53 +118,45 @@ export const BentoPlayerCard: React.FC<BentoPlayerCardProps> = ({
             width: '100%',
             height: '100%',
             objectFit: 'cover',
-            opacity: Math.min(0.45, 0.22 * effectiveWash),
-            filter: 'blur(20px) saturate(1.2)',
-            transform: 'scale(1.1)',
+            opacity: Math.min(0.45, 0.24 * effectiveWash),
+            filter: 'blur(26px) saturate(1.25)',
+            transform: 'scale(1.12)',
             pointerEvents: 'none',
           }}
         />
       )}
 
-      {/* Ambient gradient overlay */}
+      {/* Ambient obsidian / active skin gradient */}
       <div
         style={{
           position: 'absolute',
           inset: 0,
           background:
             bentoThemeMode === 'nothing'
-              ? 'linear-gradient(180deg, rgba(20, 13, 36, 0.78) 0%, rgba(10, 8, 18, 0.92) 100%)'
-              : `linear-gradient(180deg, ${bentoTokens.bgSurface}cc 0%, ${bentoTokens.bgDeep}ec 100%)`,
+              ? 'linear-gradient(180deg, rgba(20, 13, 36, 0.76) 0%, rgba(10, 8, 18, 0.94) 100%)'
+              : `linear-gradient(180deg, ${bentoTokens.bgSurface}cc 0%, ${bentoTokens.bgDeep}ef 100%)`,
           pointerEvents: 'none',
         }}
       />
 
       {/* Nothing OS Dot-Matrix Background Grid */}
       {decor === 'rich' && (
-        <DotMatrixGrid step={12} color={bentoTokens.accentLavender} opacity={0.16} inset={6} dotSize={1.5} />
+        <DotMatrixGrid step={12} color={bentoTokens.accentLavender} opacity={0.14} inset={6} dotSize={1.5} />
       )}
 
-      {/* Real-time 3-layer FFT wave background */}
-      <WaveVisualizerCanvas
-        points={spectrumPoints}
-        live={isPlaying}
-        color={bentoTokens.glowSoft}
-        blurPx={4}
-      />
-
       {/* Ryoku Instrument Corner Brackets */}
-      <InstrumentBrackets color={bentoTokens.accent} length={10} weight={2} inset={6} opacity={0.85} />
+      <InstrumentBrackets color={bentoTokens.accent} length={10} weight={2} inset={7} opacity={0.82} />
 
       <div
         style={{
           position: 'relative',
-          padding: 13,
+          padding: '14px 14px 12px',
           display: 'flex',
           flexDirection: 'column',
-          gap: 10,
+          gap: 11,
         }}
       >
-        {/* 1. TOP MODULAR HEADER BAR */}
+        {/* 1. CLEAN MODULAR HEADER: LED + STATUS + PROVIDER + OFFLINE */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <span
             className={isPlaying ? 'led-pulsing' : ''}
@@ -173,7 +173,7 @@ export const BentoPlayerCard: React.FC<BentoPlayerCardProps> = ({
               fontFamily: bentoTokens.fontMono,
               fontSize: 10,
               color: isPlaying ? bentoTokens.accentLavender : bentoTokens.muted,
-              letterSpacing: '0.05em',
+              letterSpacing: '0.06em',
               overflow: 'hidden',
               textOverflow: 'ellipsis',
               whiteSpace: 'nowrap',
@@ -184,41 +184,18 @@ export const BentoPlayerCard: React.FC<BentoPlayerCardProps> = ({
 
           <div style={{ flex: 1 }} />
 
+          {currentTrack && <ProviderBadge track={currentTrack} compact />}
           {currentTrack && <OfflineButton track={currentTrack} />}
-
-          <button
-            type="button"
-            onClick={onOpenLibrary}
-            className="ryo-pressable"
-            style={{
-              height: 24,
-              padding: '0 9px',
-              borderRadius: 12,
-              backgroundColor: bentoTokens.bgElevated,
-              border: `1px solid ${bentoTokens.accent}`,
-              display: 'flex',
-              alignItems: 'center',
-              gap: 4,
-              cursor: 'pointer',
-              color: bentoTokens.ink,
-              flexShrink: 0,
-            }}
-          >
-            <Icon name="album" size={11} color={bentoTokens.accentLavender} />
-            <span style={{ fontFamily: bentoTokens.fontMono, fontSize: 9, color: bentoTokens.ink }}>
-              RYOTUNES ↗
-            </span>
-          </button>
         </div>
 
-        {/* 2. LIVE STAGE CENTER MODE SWITCHER */}
+        {/* 2. 4-VIEW STAGE SWITCHER: COVER | LYRICS | SPECTRUM | QUEUE */}
         <div
           style={{
             display: 'grid',
-            gridTemplateColumns: '1.35fr 1.2fr 1.1fr 0.72fr',
-            gap: 4,
-            padding: 3,
-            borderRadius: 10,
+            gridTemplateColumns: 'repeat(4, 1fr)',
+            gap: 6,
+            padding: 4,
+            borderRadius: 12,
             backgroundColor: bentoTokens.bgSurface,
             border: `1px solid ${bentoTokens.borderDim}`,
           }}
@@ -232,18 +209,17 @@ export const BentoPlayerCard: React.FC<BentoPlayerCardProps> = ({
                 onClick={() => setCenter(m.key)}
                 className="ryo-pressable"
                 style={{
-                  height: 24,
-                  padding: '0 4px',
-                  borderRadius: 7,
+                  height: 28,
+                  padding: '0 6px',
+                  borderRadius: 8,
                   border: active ? `1px solid ${bentoTokens.accent}` : '1px solid transparent',
                   backgroundColor: active ? bentoTokens.bgElevated : 'transparent',
                   color: active ? bentoTokens.ink : bentoTokens.muted,
                   fontFamily: bentoTokens.fontMono,
-                  fontSize: 8,
-                  letterSpacing: '0.03em',
+                  fontSize: 9.5,
+                  fontWeight: active ? 700 : 500,
+                  letterSpacing: '0.06em',
                   whiteSpace: 'nowrap',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
                   cursor: 'pointer',
                 }}
               >
@@ -253,62 +229,59 @@ export const BentoPlayerCard: React.FC<BentoPlayerCardProps> = ({
           })}
         </div>
 
-        {/* 3. ACTIVE CENTER PANE */}
+        {/* 3. ACTIVE CENTER VIEWPORT */}
         {activeCenter === 'art' && (
-          <div style={{ display: 'flex', alignItems: 'stretch', gap: 12, minHeight: 88 }}>
-            <button
-              type="button"
-              onClick={onOpenNowPlaying}
-              title="Open Full Stage Overlay"
-              className="ryo-pressable"
-              style={{
-                width: 88,
-                height: 88,
-                borderRadius: Math.min(12, bentoTokens.radiusCard),
-                backgroundColor: bentoTokens.bgSurface,
-                border: `1px solid ${isPlaying ? bentoTokens.accent : bentoTokens.borderDim}`,
-                overflow: 'hidden',
-                padding: 0,
-                flexShrink: 0,
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                position: 'relative',
-              }}
-            >
-              {artSrc ? (
-                <img
-                  src={artSrc}
-                  alt={currentTrack?.title || 'Album cover'}
-                  style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
-                />
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 3 }}>
-                  <Icon name="album" size={30} color={bentoTokens.accent} />
-                  <span style={{ fontFamily: bentoTokens.fontMono, fontSize: 8, color: bentoTokens.muted }}>
-                    NO ART
-                  </span>
-                </div>
-              )}
-            </button>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {/* Centered Hero Cover Art */}
+            <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 2 }}>
+              <button
+                type="button"
+                onClick={onOpenNowPlaying}
+                title="Open Full Now Playing Overlay"
+                className="ryo-pressable"
+                style={{
+                  width: 174,
+                  height: 174,
+                  borderRadius: Math.min(18, bentoTokens.radiusCard + 2),
+                  backgroundColor: bentoTokens.bgSurface,
+                  border: `1.5px solid ${isPlaying ? bentoTokens.accent : bentoTokens.borderDim}`,
+                  boxShadow: isPlaying
+                    ? `0 16px 38px ${bentoTokens.glowMedium}, 0 6px 16px rgba(0,0,0,0.55)`
+                    : '0 10px 24px rgba(0,0,0,0.45)',
+                  overflow: 'hidden',
+                  padding: 0,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  position: 'relative',
+                }}
+              >
+                {artSrc ? (
+                  <img
+                    src={artSrc}
+                    alt={currentTrack?.title || 'Album cover'}
+                    style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                  />
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+                    <Icon name="album" size={44} color={bentoTokens.accent} />
+                    <span style={{ fontFamily: bentoTokens.fontMono, fontSize: 9.5, color: bentoTokens.muted }}>
+                      NO ARTWORK
+                    </span>
+                  </div>
+                )}
+              </button>
+            </div>
 
-            <div
-              style={{
-                flex: 1,
-                minWidth: 0,
-                display: 'flex',
-                flexDirection: 'column',
-                justifyContent: 'space-between',
-                gap: 4,
-              }}
-            >
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+            {/* Metadata + Like (♥) Action */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 3 }}>
                 <div
                   onClick={onOpenNowPlaying}
                   style={{
                     fontFamily: bentoTokens.fontDisplay,
-                    fontSize: 15,
+                    fontSize: 17.5,
                     lineHeight: 1.2,
                     color: bentoTokens.ink,
                     overflow: 'hidden',
@@ -319,48 +292,104 @@ export const BentoPlayerCard: React.FC<BentoPlayerCardProps> = ({
                 >
                   {(currentTrack?.title || 'UNTITLED TRACK').toUpperCase()}
                 </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span
-                    style={{
-                      fontFamily: bentoTokens.fontMono,
-                      fontSize: 10.5,
-                      lineHeight: 1.2,
-                      color: bentoTokens.accentLavender,
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                      minWidth: 0,
-                    }}
-                  >
-                    {(currentTrack?.artist || 'UNKNOWN ARTIST').toUpperCase()}
-                  </span>
-                  {currentTrack && <ProviderBadge track={currentTrack} compact />}
+                <div
+                  style={{
+                    fontFamily: bentoTokens.fontMono,
+                    fontSize: 11.5,
+                    lineHeight: 1.2,
+                    color: bentoTokens.accentLavender,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {(currentTrack?.artist || 'UNKNOWN ARTIST').toUpperCase()}
                 </div>
               </div>
 
-              {visualizerStyle === 'dot-matrix' ? (
-                <DotMatrixSpectrum points={spectrumPoints} isPlaying={isPlaying} cols={26} rows={5} />
-              ) : (
-                <div
+              {currentTrack && (
+                <button
+                  type="button"
+                  onClick={() => toggleLike(currentTrack.id)}
+                  aria-label={isLiked ? 'Unlike track' : 'Like track'}
+                  className="ryo-pressable"
                   style={{
-                    width: '100%',
-                    height: 30,
-                    borderRadius: 6,
-                    backgroundColor: bentoTokens.bgSurface,
-                    border: `1px solid ${bentoTokens.borderDim}`,
-                    padding: '2px 4px',
+                    width: 40,
+                    height: 40,
+                    borderRadius: 12,
+                    backgroundColor: isLiked ? bentoTokens.glowSoft : bentoTokens.bgSurface,
+                    border: `1px solid ${isLiked ? bentoTokens.accent : bentoTokens.borderDim}`,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    cursor: 'pointer',
+                    flexShrink: 0,
                   }}
                 >
+                  <Icon
+                    name="heart"
+                    size={18}
+                    color={isLiked ? bentoTokens.accentLavender : bentoTokens.muted}
+                  />
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={onOpenLibrary}
+                aria-label="Open library"
+                className="ryo-pressable"
+                style={{
+                  width: 40,
+                  height: 40,
+                  borderRadius: 12,
+                  backgroundColor: bentoTokens.bgSurface,
+                  border: `1px solid ${bentoTokens.borderDim}`,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'pointer',
+                  flexShrink: 0,
+                }}
+              >
+                <Icon name="library" size={17} color={bentoTokens.ink} />
+              </button>
+            </div>
+
+            {/* Combined 60-FPS Waves + 26x5 FFT Dot-Matrix Visualizer */}
+            <div
+              style={{
+                position: 'relative',
+                width: '100%',
+                height: 46,
+                borderRadius: 10,
+                backgroundColor: bentoTokens.bgSurface,
+                border: `1px solid ${bentoTokens.borderDim}`,
+                overflow: 'hidden',
+                padding: '5px 8px',
+                display: 'flex',
+                alignItems: 'center',
+              }}
+            >
+              <WaveVisualizerCanvas
+                live={isPlaying}
+                color={bentoTokens.glowMedium}
+                opacity={0.9}
+                blurPx={2}
+              />
+              <div style={{ position: 'relative', width: '100%', zIndex: 1 }}>
+                {visualizerStyle === 'dot-matrix' ? (
+                  <DotMatrixSpectrum isPlaying={isPlaying} cols={26} rows={5} height={34} transparent />
+                ) : (
                   <SpectrumCanvas
-                    points={spectrumPoints}
                     live={isPlaying}
-                    height={24}
+                    height={34}
                     forceMode={visualizerStyle === 'spectrum-bars' ? 'bars' : 'wave'}
                     accentOverride={bentoTokens.accent}
                     inkOverride={bentoTokens.ink}
                   />
-                </div>
-              )}
+                )}
+              </div>
             </div>
           </div>
         )}
@@ -369,7 +398,7 @@ export const BentoPlayerCard: React.FC<BentoPlayerCardProps> = ({
           <div
             style={{
               ...scopedSkinVars,
-              height: 204,
+              height: 292,
               borderRadius: 12,
               backgroundColor: bentoTokens.bgSurface,
               border: `1px solid ${bentoTokens.borderDim}`,
@@ -386,7 +415,7 @@ export const BentoPlayerCard: React.FC<BentoPlayerCardProps> = ({
           <div
             style={{
               ...scopedSkinVars,
-              height: 204,
+              height: 292,
               borderRadius: 12,
               backgroundColor: bentoTokens.bgSurface,
               border: `1px solid ${bentoTokens.borderDim}`,
@@ -398,58 +427,43 @@ export const BentoPlayerCard: React.FC<BentoPlayerCardProps> = ({
           </div>
         )}
 
-        {/* 4. INTERACTIVE SEEKBAR (42-div Scale / 240-bar Waveform / 2px Hairline) */}
-        <SeekbarControl
-          trackId={currentTrack?.id || 'ryotunes'}
-          samples={currentTrack?.waveform}
-          fraction={progress}
-          duration={duration}
-          accentColor={bentoTokens.accent}
-          inkColor={bentoTokens.scaleInk}
-          compact
-          onSeekFraction={(f) => seek(f * duration)}
-        />
-
-        {/* 5. BOTTOM TRANSPORT BAR (TIME + SHUFFLE + PREV + PLAY/PAUSE + NEXT + REPEAT) */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-          <div
-            style={{
-              height: 30,
-              padding: '0 7px',
-              borderRadius: 7,
-              backgroundColor: bentoTokens.bgSurface,
-              border: `1px solid ${bentoTokens.borderDim}`,
-              display: 'flex',
-              alignItems: 'center',
-              gap: 5,
-              flexShrink: 0,
-            }}
-          >
-            <span
-              style={{
-                width: 5,
-                height: 5,
-                borderRadius: 2.5,
-                backgroundColor: bentoTokens.accentLavender,
-                flexShrink: 0,
-              }}
-            />
-            <span style={{ fontFamily: bentoTokens.fontMono, fontSize: 10, color: bentoTokens.ink }}>
-              {fmtTime(position)} / {fmtTime(duration)}
+        {/* 4. THUMB-ZONE SEEKBAR (36px touch target) + CLEAR TIMESTAMPS */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <div style={{ minHeight: 36, display: 'flex', alignItems: 'center' }}>
+            <div style={{ width: '100%' }}>
+              <SeekbarControl
+                trackId={currentTrack?.id || 'ryotunes'}
+                samples={currentTrack?.waveform}
+                fraction={progress}
+                duration={duration}
+                accentColor={bentoTokens.accent}
+                inkColor={bentoTokens.scaleInk}
+                compact
+                onSeekFraction={(f) => seek(f * duration)}
+              />
+            </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 2px' }}>
+            <span style={{ fontFamily: bentoTokens.fontMono, fontSize: 10.5, color: bentoTokens.accentLavender }}>
+              {fmtTime(position)}
+            </span>
+            <span style={{ fontFamily: bentoTokens.fontMono, fontSize: 10.5, color: bentoTokens.muted }}>
+              {fmtTime(duration)}
             </span>
           </div>
+        </div>
 
-          <div style={{ flex: 1 }} />
-
+        {/* 5. ERGONOMIC THUMB TRANSPORT DECK (48px Primary + 42px Skip + 38px Mode) */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
           <button
             type="button"
             onClick={toggleShuffle}
             aria-label="Toggle shuffle"
             className="ryo-pressable"
             style={{
-              width: 28,
-              height: 30,
-              borderRadius: 8,
+              width: 38,
+              height: 38,
+              borderRadius: 11,
               backgroundColor: shuffle ? bentoTokens.glowSoft : bentoTokens.bgElevated,
               border: `1px solid ${shuffle ? bentoTokens.accent : bentoTokens.borderDim}`,
               display: 'flex',
@@ -459,7 +473,7 @@ export const BentoPlayerCard: React.FC<BentoPlayerCardProps> = ({
               flexShrink: 0,
             }}
           >
-            <Icon name="shuffle" size={13} color={shuffle ? bentoTokens.accentLavender : bentoTokens.muted} />
+            <Icon name="shuffle" size={16} color={shuffle ? bentoTokens.accentLavender : bentoTokens.muted} />
           </button>
 
           <button
@@ -468,9 +482,9 @@ export const BentoPlayerCard: React.FC<BentoPlayerCardProps> = ({
             aria-label="Previous track"
             className="ryo-pressable"
             style={{
-              width: 30,
-              height: 30,
-              borderRadius: 8,
+              width: 44,
+              height: 44,
+              borderRadius: 12,
               backgroundColor: bentoTokens.bgElevated,
               border: `1px solid ${bentoTokens.borderDim}`,
               display: 'flex',
@@ -480,7 +494,7 @@ export const BentoPlayerCard: React.FC<BentoPlayerCardProps> = ({
               flexShrink: 0,
             }}
           >
-            <Icon name="previous" size={14} color={bentoTokens.ink} />
+            <Icon name="previous" size={18} color={bentoTokens.ink} />
           </button>
 
           <button
@@ -489,24 +503,24 @@ export const BentoPlayerCard: React.FC<BentoPlayerCardProps> = ({
             aria-label={isPlaying ? 'Pause' : 'Play'}
             className="ryo-pressable"
             style={{
-              minWidth: 78,
-              height: 32,
-              padding: '0 10px',
-              borderRadius: 16,
+              flex: 1,
+              maxWidth: 156,
+              height: 48,
+              padding: '0 16px',
+              borderRadius: 24,
               backgroundColor: isPlaying ? bentoTokens.accent : bentoTokens.bgElevated,
-              border: `1px solid ${bentoTokens.accent}`,
+              border: `1.5px solid ${bentoTokens.accent}`,
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              gap: 4,
+              gap: 7,
               cursor: 'pointer',
               color: '#FFFFFF',
-              boxShadow: isPlaying ? `0 0 14px ${bentoTokens.glowMedium}` : 'none',
-              flexShrink: 0,
+              boxShadow: isPlaying ? `0 0 20px ${bentoTokens.glowMedium}` : 'none',
             }}
           >
-            <Icon name={isPlaying ? 'pause' : 'play'} size={14} color={isPlaying ? '#FFFFFF' : bentoTokens.ink} />
-            <span style={{ fontFamily: bentoTokens.fontMono, fontSize: 10, color: isPlaying ? '#FFFFFF' : bentoTokens.ink }}>
+            <Icon name={isPlaying ? 'pause' : 'play'} size={18} color={isPlaying ? '#FFFFFF' : bentoTokens.ink} />
+            <span style={{ fontFamily: bentoTokens.fontMono, fontSize: 12, fontWeight: 700, color: isPlaying ? '#FFFFFF' : bentoTokens.ink }}>
               {isPlaying ? 'PAUSE' : 'PLAY'}
             </span>
           </button>
@@ -517,9 +531,9 @@ export const BentoPlayerCard: React.FC<BentoPlayerCardProps> = ({
             aria-label="Next track"
             className="ryo-pressable"
             style={{
-              width: 30,
-              height: 30,
-              borderRadius: 8,
+              width: 44,
+              height: 44,
+              borderRadius: 12,
               backgroundColor: bentoTokens.bgElevated,
               border: `1px solid ${bentoTokens.borderDim}`,
               display: 'flex',
@@ -529,7 +543,7 @@ export const BentoPlayerCard: React.FC<BentoPlayerCardProps> = ({
               flexShrink: 0,
             }}
           >
-            <Icon name="next" size={14} color={bentoTokens.ink} />
+            <Icon name="next" size={18} color={bentoTokens.ink} />
           </button>
 
           <button
@@ -538,9 +552,9 @@ export const BentoPlayerCard: React.FC<BentoPlayerCardProps> = ({
             aria-label="Cycle repeat mode"
             className="ryo-pressable"
             style={{
-              width: 28,
-              height: 30,
-              borderRadius: 8,
+              width: 38,
+              height: 38,
+              borderRadius: 11,
               backgroundColor: repeat !== 'off' ? bentoTokens.glowSoft : bentoTokens.bgElevated,
               border: `1px solid ${repeat !== 'off' ? bentoTokens.accent : bentoTokens.borderDim}`,
               display: 'flex',
@@ -552,9 +566,78 @@ export const BentoPlayerCard: React.FC<BentoPlayerCardProps> = ({
           >
             <Icon
               name={repeat === 'one' ? 'repeat-one' : 'repeat'}
-              size={13}
+              size={16}
               color={repeat !== 'off' ? bentoTokens.accentLavender : bentoTokens.muted}
             />
+          </button>
+        </div>
+
+        {/* 6. QUICK INSTRUMENT STRIP: SOUND FX · VOL OSD · SKIN */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, paddingTop: 2 }}>
+          <button
+            type="button"
+            onClick={onOpenSound}
+            className="ryo-pressable"
+            style={{
+              height: 34,
+              borderRadius: 10,
+              backgroundColor: bentoTokens.bgSurface,
+              border: `1px solid ${bentoTokens.borderDim}`,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 6,
+              cursor: 'pointer',
+            }}
+          >
+            <Icon name="sound" size={13} color={bentoTokens.accentLavender} />
+            <span style={{ fontFamily: bentoTokens.fontMono, fontSize: 9, color: bentoTokens.ink }}>
+              SOUND FX
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={triggerOsd}
+            className="ryo-pressable"
+            style={{
+              height: 34,
+              borderRadius: 10,
+              backgroundColor: bentoTokens.bgSurface,
+              border: `1px solid ${bentoTokens.borderDim}`,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 6,
+              cursor: 'pointer',
+            }}
+          >
+            <Icon name="volume" size={13} color={bentoTokens.accentLavender} />
+            <span style={{ fontFamily: bentoTokens.fontMono, fontSize: 9, color: bentoTokens.ink }}>
+              VOL OSD
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenStudio}
+            className="ryo-pressable"
+            style={{
+              height: 34,
+              borderRadius: 10,
+              backgroundColor: bentoTokens.bgSurface,
+              border: `1px solid ${bentoTokens.borderDim}`,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 6,
+              cursor: 'pointer',
+            }}
+          >
+            <Icon name="settings" size={13} color={bentoTokens.accentLavender} />
+            <span style={{ fontFamily: bentoTokens.fontMono, fontSize: 9, color: bentoTokens.ink }}>
+              SKIN
+            </span>
           </button>
         </div>
       </div>

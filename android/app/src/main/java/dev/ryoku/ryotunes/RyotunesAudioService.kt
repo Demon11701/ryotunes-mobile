@@ -27,6 +27,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
@@ -158,6 +159,8 @@ class RyotunesAudioService : Service() {
         override fun run() {
             if (::player.isInitialized && cachedIsPlaying && isScreenInteractive()) {
                 updateFftCaptureState()
+                val liveBands = pcmFftProcessor.getLatestBands(true)
+                lastSpectrumBands = liveBands
                 val track = queue.getOrNull(currentIndex)
                 val durMs = when {
                     player.duration > 0L -> player.duration
@@ -166,12 +169,26 @@ class RyotunesAudioService : Service() {
                 }
                 RyotunesBentoWidgetProvider.updateLiveSpectrumAndProgress(
                     this@RyotunesAudioService,
-                    lastSpectrumBands,
+                    liveBands,
                     player.currentPosition.coerceAtLeast(0L),
                     durMs,
                     true
                 )
                 mainHandler.postDelayed(this, 350L)
+            }
+        }
+    }
+
+    private val fftBridgeTicker = object : Runnable {
+        override fun run() {
+            if (::player.isInitialized && uiActive && cachedIsPlaying) {
+                val elapsedSinceBuf = SystemClock.elapsedRealtime() - pcmFftProcessor.lastBufferRealtimeMs
+                if (elapsedSinceBuf >= 40L) {
+                    val gapBands = pcmFftProcessor.getLatestBands(true)
+                    lastSpectrumBands = gapBands
+                    listener?.onSpectrumFrame(gapBands)
+                }
+                mainHandler.postDelayed(this, 33L)
             }
         }
     }
@@ -250,6 +267,20 @@ class RyotunesAudioService : Service() {
                 }
             })
             isActive = true
+            setPlaybackState(
+                PlaybackStateCompat.Builder()
+                    .setActions(
+                        PlaybackStateCompat.ACTION_PLAY or
+                            PlaybackStateCompat.ACTION_PAUSE or
+                            PlaybackStateCompat.ACTION_PLAY_PAUSE or
+                            PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
+                            PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+                            PlaybackStateCompat.ACTION_SEEK_TO or
+                            PlaybackStateCompat.ACTION_STOP
+                    )
+                    .setState(PlaybackStateCompat.STATE_PAUSED, 0L, 1.0f)
+                    .build()
+            )
         }
 
         player.addListener(object : Player.Listener {
@@ -257,14 +288,16 @@ class RyotunesAudioService : Service() {
                 cachedIsPlaying = isPlaying
                 if (isPlaying) consecutiveErrors = 0
                 updateFftCaptureState()
-                syncMediaSessionAndNotification()
-                emitState()
+                syncMediaSessionAndNotification(forceNotify = true, isPlayingOverride = isPlaying)
+                emitState(isPlayingOverride = isPlaying)
                 updateWidget()
                 persistServiceState()
                 mainHandler.removeCallbacks(positionTicker)
                 mainHandler.removeCallbacks(widgetLiveTicker)
+                mainHandler.removeCallbacks(fftBridgeTicker)
                 if (isPlaying) {
                     mainHandler.post(positionTicker)
+                    if (uiActive) mainHandler.postDelayed(fftBridgeTicker, 33L)
                     if (isScreenInteractive()) {
                         mainHandler.postDelayed(widgetLiveTicker, 350L)
                     }
@@ -340,6 +373,7 @@ class RyotunesAudioService : Service() {
         persistServiceState()
         mainHandler.removeCallbacks(positionTicker)
         mainHandler.removeCallbacks(widgetLiveTicker)
+        mainHandler.removeCallbacks(fftBridgeTicker)
         pcmFftProcessor.activeCapture = false
         releaseAudioEffects()
         artExecutor.shutdownNow()
@@ -349,7 +383,6 @@ class RyotunesAudioService : Service() {
             } catch (_: Exception) {}
             noisyRegistered = false
         }
-        cachedArtBitmap?.recycle()
         cachedArtBitmap = null
         mediaSession.isActive = false
         mediaSession.release()
@@ -366,8 +399,10 @@ class RyotunesAudioService : Service() {
         uiActive = active
         updateFftCaptureState()
         mainHandler.removeCallbacks(positionTicker)
-        if (active && ::player.isInitialized && player.isPlaying) {
+        mainHandler.removeCallbacks(fftBridgeTicker)
+        if (active && ::player.isInitialized && (player.isPlaying || cachedIsPlaying)) {
             mainHandler.post(positionTicker)
+            mainHandler.postDelayed(fftBridgeTicker, 33L)
         }
     }
 
@@ -393,19 +428,22 @@ class RyotunesAudioService : Service() {
 
     fun playImmediate() {
         if (queue.isEmpty()) return
-        promoteToForeground()
         if (player.playbackState == Player.STATE_IDLE) {
+            promoteToForeground(isPlayingOverride = true)
             loadCurrentTrack(true, restoredPositionMs)
             return
         }
         cachedIsPlaying = true
         player.playWhenReady = true
+        promoteToForeground(isPlayingOverride = true)
         updateFftCaptureState()
         emitPlaybackStateNow(isPlayingOverride = true)
-        syncMediaSessionAndNotification(isPlayingOverride = true)
+        syncMediaSessionAndNotification(forceNotify = true, isPlayingOverride = true)
         updateWidget()
         mainHandler.removeCallbacks(positionTicker)
         mainHandler.post(positionTicker)
+        mainHandler.removeCallbacks(fftBridgeTicker)
+        if (uiActive) mainHandler.postDelayed(fftBridgeTicker, 33L)
         mainHandler.removeCallbacks(widgetLiveTicker)
         if (isScreenInteractive()) {
             mainHandler.postDelayed(widgetLiveTicker, 350L)
@@ -416,6 +454,7 @@ class RyotunesAudioService : Service() {
         cachedIsPlaying = false
         player.playWhenReady = false
         mainHandler.removeCallbacks(widgetLiveTicker)
+        mainHandler.removeCallbacks(fftBridgeTicker)
         updateFftCaptureState()
         emitPlaybackStateNow(isPlayingOverride = false)
         persistServiceState()
@@ -562,11 +601,14 @@ class RyotunesAudioService : Service() {
     private fun loadCurrentTrack(autoPlay: Boolean, initialPosMs: Long = 0L) {
         val track = queue.getOrNull(currentIndex) ?: return
         try {
-            if (autoPlay) promoteToForeground()
-            val itemBuilder = MediaItem.Builder().setUri(Uri.parse(track.contentUri))
-            if (track.mimeType == "application/x-mpegURL" || track.contentUri.contains(".m3u8")) {
+            val offlineHit = RyotunesOnlineResolver.resolveOfflineUriIfSaved(this, track.id)
+            val resolvedUri = offlineHit?.first ?: track.contentUri
+            val resolvedMime = offlineHit?.second ?: track.mimeType
+
+            val itemBuilder = MediaItem.Builder().setUri(Uri.parse(resolvedUri))
+            if (resolvedMime == "application/x-mpegURL" || resolvedUri.contains(".m3u8")) {
                 itemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
-            } else if (track.mimeType?.contains("webm") == true || track.contentUri.contains("mime=audio%2Fwebm")) {
+            } else if (resolvedMime?.contains("webm") == true || resolvedUri.contains("mime=audio%2Fwebm")) {
                 itemBuilder.setMimeType(MimeTypes.AUDIO_WEBM)
             }
             player.setMediaItem(itemBuilder.build())
@@ -586,8 +628,9 @@ class RyotunesAudioService : Service() {
             }
 
             loadArtworkForTrack(track)
-            syncMediaSessionAndNotification(forceNotify = autoPlay)
-            emitState()
+            if (autoPlay) promoteToForeground(isPlayingOverride = true)
+            syncMediaSessionAndNotification(forceNotify = true, isPlayingOverride = autoPlay)
+            emitState(isPlayingOverride = autoPlay)
             updateWidget()
         } catch (e: Exception) {
             listener?.onPlaybackError("Cannot open \"${track.title}\": ${e.localizedMessage ?: "error"}")
@@ -663,8 +706,10 @@ class RyotunesAudioService : Service() {
         } catch (_: Exception) {}
     }
 
-    private fun promoteToForeground() {
-        val notif = buildNotification()
+    private fun promoteToForeground(isPlayingOverride: Boolean? = null) {
+        val playing = isPlayingOverride ?: (::player.isInitialized && (player.isPlaying || cachedIsPlaying))
+        syncMediaSessionMetadataAndPlaybackState(playing)
+        val notif = buildNotification(playing)
         try {
             if (!isForegroundStarted) {
                 ContextCompat.startForegroundService(this, Intent(this, RyotunesAudioService::class.java))
@@ -681,7 +726,7 @@ class RyotunesAudioService : Service() {
             }
             isForegroundStarted = true
             val track = queue.getOrNull(currentIndex)
-            lastNotifKey = "${track?.id}|${::player.isInitialized && player.isPlaying}"
+            lastNotifKey = "${track?.id}|$playing|$shuffle|$cachedArtKey|${cachedArtBitmap != null}"
             lastNotifAtMs = System.currentTimeMillis()
         } catch (_: Exception) {
             notificationManager.notify(NOTIFICATION_ID, notif)
@@ -700,10 +745,9 @@ class RyotunesAudioService : Service() {
 
     private fun loadArtworkForTrack(track: NativeTrack) {
         val key = track.artworkPath ?: track.artworkUrl
-        if (key == cachedArtKey) return
+        if (key == cachedArtKey && cachedArtBitmap != null) return
         cachedArtKey = key
         cachedArtDiskPath = track.artworkPath
-        cachedArtBitmap?.recycle()
         cachedArtBitmap = null
 
         val trackIdSnapshot = track.id
@@ -719,45 +763,48 @@ class RyotunesAudioService : Service() {
 
         val remoteUrl = track.artworkUrl
         if (!remoteUrl.isNullOrEmpty()) {
+            val artDir = File(cacheDir, "ryotunes_art").apply { mkdirs() }
+            val safeFile = File(artDir, "url_${trackIdSnapshot.hashCode()}.jpg")
+            if (safeFile.exists() && safeFile.length() > 128L) {
+                try {
+                    val diskBmp = BitmapFactory.decodeFile(safeFile.absolutePath)
+                    if (diskBmp != null) {
+                        cachedArtBitmap = scaleBitmap512(diskBmp)
+                        cachedArtDiskPath = safeFile.absolutePath
+                        return
+                    }
+                } catch (_: Exception) {}
+            }
+
             artExecutor.execute {
                 try {
-                    val artDir = File(cacheDir, "ryotunes_art").apply { mkdirs() }
-                    val safeFile = File(artDir, "url_${trackIdSnapshot.hashCode()}.jpg")
-                    var bmp: Bitmap? = if (safeFile.exists() && safeFile.length() > 128L) {
-                        BitmapFactory.decodeFile(safeFile.absolutePath)
-                    } else null
-
-                    if (bmp == null) {
-                        val conn = (URL(remoteUrl).openConnection() as HttpURLConnection).apply {
-                            connectTimeout = 7000
-                            readTimeout = 7000
-                            setRequestProperty("User-Agent", "Mozilla/5.0")
-                            instanceFollowRedirects = true
-                        }
-                        try {
-                            if (conn.responseCode in 200..299) {
-                                val bytes = conn.inputStream.use { it.readBytes() }
-                                if (bytes.isNotEmpty()) {
-                                    bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                                }
+                    var bmp: Bitmap? = null
+                    val conn = (URL(remoteUrl).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 7000
+                        readTimeout = 7000
+                        setRequestProperty("User-Agent", "Mozilla/5.0")
+                        instanceFollowRedirects = true
+                    }
+                    try {
+                        if (conn.responseCode in 200..299) {
+                            val bytes = conn.inputStream.use { it.readBytes() }
+                            if (bytes.isNotEmpty()) {
+                                bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                             }
-                        } finally {
-                            conn.disconnect()
                         }
+                    } finally {
+                        conn.disconnect()
                     }
 
                     if (bmp != null) {
                         val scaled = scaleBitmap512(bmp)
-                        if (!safeFile.exists() || safeFile.length() <= 128L) {
-                            runCatching {
-                                FileOutputStream(safeFile).use { fos ->
-                                    scaled.compress(Bitmap.CompressFormat.JPEG, 88, fos)
-                                }
+                        runCatching {
+                            FileOutputStream(safeFile).use { fos ->
+                                scaled.compress(Bitmap.CompressFormat.JPEG, 88, fos)
                             }
                         }
                         mainHandler.post {
                             if (queue.getOrNull(currentIndex)?.id == trackIdSnapshot) {
-                                cachedArtBitmap?.recycle()
                                 cachedArtBitmap = scaled
                                 cachedArtDiskPath = safeFile.absolutePath
                                 syncMediaSessionAndNotification(forceNotify = true)
@@ -772,9 +819,8 @@ class RyotunesAudioService : Service() {
         }
     }
 
-    private fun syncMediaSessionAndNotification(forceNotify: Boolean = false, isPlayingOverride: Boolean? = null) {
+    private fun syncMediaSessionMetadataAndPlaybackState(playing: Boolean) {
         val track = queue.getOrNull(currentIndex)
-        val playing = isPlayingOverride ?: (::player.isInitialized && player.isPlaying)
         val durMs = when {
             player.duration > 0L -> player.duration
             (track?.durationSec ?: 0.0) > 0.0 -> ((track!!.durationSec) * 1000.0).toLong()
@@ -816,11 +862,17 @@ class RyotunesAudioService : Service() {
             .setState(stateCode, player.currentPosition.coerceAtLeast(0L), currentSpeed)
             .build()
         mediaSession.setPlaybackState(pbState)
+    }
+
+    private fun syncMediaSessionAndNotification(forceNotify: Boolean = false, isPlayingOverride: Boolean? = null) {
+        val track = queue.getOrNull(currentIndex)
+        val playing = isPlayingOverride ?: (::player.isInitialized && (player.isPlaying || cachedIsPlaying))
+        syncMediaSessionMetadataAndPlaybackState(playing)
 
         if (isForegroundStarted || playing) {
-            val key = "${track?.id}|$playing|$shuffle|${cachedArtBitmap != null}"
+            val key = "${track?.id}|$playing|$shuffle|$cachedArtKey|${cachedArtBitmap != null}"
             val now = System.currentTimeMillis()
-            if (forceNotify || key != lastNotifKey || (now - lastNotifAtMs) >= 400L) {
+            if (forceNotify || key != lastNotifKey || (now - lastNotifAtMs) >= 1000L) {
                 lastNotifKey = key
                 lastNotifAtMs = now
                 notificationManager.notify(NOTIFICATION_ID, buildNotification(playing))
@@ -829,7 +881,7 @@ class RyotunesAudioService : Service() {
     }
 
     private fun buildNotification(isPlayingOverride: Boolean? = null): Notification {
-        val playing = isPlayingOverride ?: (::player.isInitialized && player.isPlaying)
+        val playing = isPlayingOverride ?: (::player.isInitialized && (player.isPlaying || cachedIsPlaying))
         val track = queue.getOrNull(currentIndex)
         val openIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -853,8 +905,10 @@ class RyotunesAudioService : Service() {
             .setLargeIcon(cachedArtBitmap)
             .setContentIntent(contentPending)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setShowWhen(false)
             .setOngoing(playing)
             .setOnlyAlertOnce(true)
+            .setColorized(true)
             .setColor(0xFFA855F7.toInt())
             .addAction(R.drawable.ic_ryo_prev, "Previous", prevPending)
             .addAction(
@@ -875,12 +929,12 @@ class RyotunesAudioService : Service() {
         val intent = Intent(this, RyotunesAudioService::class.java).apply {
             action = actionCmd
         }
-        return PendingIntent.getService(
-            this,
-            reqCode,
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
+        val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            PendingIntent.getForegroundService(this, reqCode, intent, flags)
+        } else {
+            PendingIntent.getService(this, reqCode, intent, flags)
+        }
     }
 
     private fun ensureNotificationChannel() {

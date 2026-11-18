@@ -1,8 +1,9 @@
 import React, { useEffect, useRef } from 'react';
+import { useAudio } from '../audio/AudioContextProvider';
 import { bandRangeEnergy, sampleBandInterpolated } from '../audio/spectrumUtils';
 
 interface WaveVisualizerCanvasProps {
-  points: number[];
+  points?: number[];
   live: boolean;
   maxVal?: number;
   smoothing?: number;
@@ -12,8 +13,8 @@ interface WaveVisualizerCanvasProps {
 }
 
 /**
- * Edge-to-edge 3-layer FFT wave synthesizer driven by real 40-band spectrum:
- * Bass (0..7), Mids (8..22), and Highs (23..39), decaying smoothly to 0 when paused.
+ * 60-FPS Ref-Driven 3-layer FFT wave visualizer driven directly by AudioContext spectrum
+ * subscription: Bass (0..7), Mids (8..22), and Highs (23..39), decaying smoothly to 0 on pause.
  */
 export const WaveVisualizerCanvas: React.FC<WaveVisualizerCanvasProps> = ({
   points,
@@ -24,14 +25,26 @@ export const WaveVisualizerCanvas: React.FC<WaveVisualizerCanvasProps> = ({
   opacity = 1,
   blurPx = 3,
 }) => {
+  const { getSpectrumPoints, subscribeSpectrum } = useAudio();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const pointsRef = useRef<number[]>(points);
+  const targetRef = useRef<number[]>(points && points.length > 0 ? points : getSpectrumPoints());
+  const localPtsRef = useRef<number[]>(new Array(40).fill(0));
   const liveRef = useRef<boolean>(live);
   const envRef = useRef<{ bass: number; mid: number; high: number }>({ bass: 0, mid: 0, high: 0 });
   const phaseRef = useRef<number>(0);
 
-  pointsRef.current = points;
   liveRef.current = live;
+  if (points && points.length > 0 && points.some((v) => v > 0)) {
+    targetRef.current = points;
+  }
+
+  useEffect(() => {
+    targetRef.current = getSpectrumPoints();
+    const unsub = subscribeSpectrum((pts) => {
+      targetRef.current = pts;
+    });
+    return unsub;
+  }, [getSpectrumPoints, subscribeSpectrum]);
 
   useEffect(() => {
     let raf = 0;
@@ -62,20 +75,24 @@ export const WaveVisualizerCanvas: React.FC<WaveVisualizerCanvasProps> = ({
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, w + 1, h + 1);
 
-      const curPts = pointsRef.current;
-      const isLive = liveRef.current && curPts.length > 0;
+      const curTgt = targetRef.current;
+      const isLive = liveRef.current && curTgt.length > 0;
+      const smoothedPts = localPtsRef.current;
 
-      const targetBass = isLive ? bandRangeEnergy(curPts, 0, 7, maxVal) : 0;
-      const targetMid = isLive ? bandRangeEnergy(curPts, 8, 22, maxVal) : 0;
-      const targetHigh = isLive ? bandRangeEnergy(curPts, 23, 39, maxVal) : 0;
+      for (let i = 0; i < 40; i++) {
+        const tgt = isLive ? curTgt[i] || 0 : 0;
+        const next = smoothedPts[i] + (tgt - smoothedPts[i]) * 0.28;
+        smoothedPts[i] = next < 0.5 ? 0 : next;
+      }
+
+      const targetBass = isLive ? bandRangeEnergy(smoothedPts, 0, 7, maxVal) : 0;
+      const targetMid = isLive ? bandRangeEnergy(smoothedPts, 8, 22, maxVal) : 0;
+      const targetHigh = isLive ? bandRangeEnergy(smoothedPts, 23, 39, maxVal) : 0;
 
       const env = envRef.current;
-      const rateBass = targetBass >= env.bass ? 0.42 : 0.16;
-      const rateMid = targetMid >= env.mid ? 0.42 : 0.16;
-      const rateHigh = targetHigh >= env.high ? 0.42 : 0.16;
-      env.bass = env.bass * (1 - rateBass) + targetBass * rateBass;
-      env.mid = env.mid * (1 - rateMid) + targetMid * rateMid;
-      env.high = env.high * (1 - rateHigh) + targetHigh * rateHigh;
+      env.bass += (targetBass - env.bass) * 0.28;
+      env.mid += (targetMid - env.mid) * 0.28;
+      env.high += (targetHigh - env.high) * 0.28;
 
       const totalEnergy = env.bass + env.mid + env.high;
       if (!isLive && totalEnergy < 0.004) {
@@ -85,14 +102,14 @@ export const WaveVisualizerCanvas: React.FC<WaveVisualizerCanvasProps> = ({
         return;
       }
 
-      phaseRef.current += 0.055 + env.bass * 0.06;
+      phaseRef.current += 0.052 + env.bass * 0.065;
       const phase = phaseRef.current;
       const steps = 40;
 
       const layers = [
-        { energy: env.bass, freq: 1.6, speed: 1.0, bandOffset: 0, baseAlpha: 0.75, scaleY: 0.56 },
-        { energy: env.mid, freq: 2.5, speed: -1.35, bandOffset: 6, baseAlpha: 0.52, scaleY: 0.44 },
-        { energy: env.high, freq: 3.7, speed: 1.85, bandOffset: 12, baseAlpha: 0.36, scaleY: 0.34 },
+        { energy: env.bass, freq: 1.6, speed: 1.0, bandOffset: 0, baseAlpha: 0.78, scaleY: 0.58 },
+        { energy: env.mid, freq: 2.5, speed: -1.35, bandOffset: 6, baseAlpha: 0.54, scaleY: 0.45 },
+        { energy: env.high, freq: 3.7, speed: 1.85, bandOffset: 12, baseAlpha: 0.38, scaleY: 0.34 },
       ];
 
       layers.forEach((layer) => {
@@ -102,12 +119,10 @@ export const WaveVisualizerCanvas: React.FC<WaveVisualizerCanvasProps> = ({
         for (let i = 0; i <= steps; i++) {
           const t = i / steps;
           const x = t * w;
-          const specVal = isLive
-            ? sampleBandInterpolated(curPts, (i + layer.bandOffset) % steps, steps, maxVal)
-            : 0;
+          const specVal = sampleBandInterpolated(smoothedPts, (i + layer.bandOffset) % steps, steps, maxVal);
           const smoothSpec = (specVal * (1 + smoothing * 0.08)) / (1 + smoothing * 0.08);
           const carrier = 0.5 + 0.5 * Math.sin(t * Math.PI * layer.freq * 2 + phase * layer.speed);
-          const amp = (layer.energy * 0.65 + smoothSpec * 0.35) * (0.45 + 0.55 * carrier);
+          const amp = (layer.energy * 0.62 + smoothSpec * 0.38) * (0.45 + 0.55 * carrier);
           const y = h - Math.max(0, Math.min(0.88, amp * layer.scaleY)) * h;
           ctx.lineTo(x, y);
         }
@@ -120,7 +135,9 @@ export const WaveVisualizerCanvas: React.FC<WaveVisualizerCanvasProps> = ({
         ctx.restore();
       });
 
-      raf = requestAnimationFrame(renderFrame);
+      if (isLive || totalEnergy >= 0.004) {
+        raf = requestAnimationFrame(renderFrame);
+      }
     };
 
     raf = requestAnimationFrame(renderFrame);

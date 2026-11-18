@@ -64,6 +64,9 @@ interface AudioContextValue {
   artists: ArtistGroup[];
   audioFx: AudioFxState;
   spectrumPoints: number[];
+  getSpectrumPoints: () => number[];
+  subscribeSpectrum: (cb: (pts: number[]) => void) => () => void;
+  isTrackOffline: (trackId: string) => boolean;
   osdVisible: boolean;
   toast: ToastMessage | null;
 
@@ -149,14 +152,40 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [lyricsLoadingId, setLyricsLoadingId] = useState<string | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
 
+  const offlineMap = useMemo(() => {
+    const m = new Map<string, Track>();
+    for (const o of offlineTracks) {
+      m.set(o.id, o);
+      if (o.originalId) m.set(o.originalId, o);
+    }
+    return m;
+  }, [offlineTracks]);
+
+  const isTrackOffline = useCallback(
+    (trackId: string) => offlineMap.has(trackId),
+    [offlineMap]
+  );
+
   const tracks = useMemo(() => {
     const map = new Map<string, Track>();
     for (const t of [...demoTracks, ...onlineTracks, ...localTracks, ...offlineTracks]) {
-      const cachedLyrics = lyricsMap[t.id];
-      map.set(t.id, cachedLyrics && !t.lyrics ? { ...t, lyrics: cachedLyrics } : t);
+      const offlineMatch = offlineMap.get(t.id) || (t.originalId ? offlineMap.get(t.originalId) : undefined);
+      const base = offlineMatch
+        ? {
+            ...t,
+            src: offlineMatch.src || t.src,
+            mimeType: offlineMatch.mimeType || t.mimeType,
+            artworkPath: offlineMatch.artworkPath || t.artworkPath,
+            offline: true,
+            offlineSizeBytes: offlineMatch.offlineSizeBytes ?? t.offlineSizeBytes,
+            offlinePath: offlineMatch.offlinePath || t.offlinePath,
+          }
+        : t;
+      const cachedLyrics = lyricsMap[base.id];
+      map.set(base.id, cachedLyrics && !base.lyrics ? { ...base, lyrics: cachedLyrics } : base);
     }
     return Array.from(map.values());
-  }, [offlineTracks, localTracks, onlineTracks, demoTracks, lyricsMap]);
+  }, [offlineTracks, localTracks, onlineTracks, demoTracks, lyricsMap, offlineMap]);
 
   const [audioQuality, setAudioQuality] = useState<AudioQuality>(() => {
     const q = localStorage.getItem('ryotunes_quality');
@@ -233,9 +262,22 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [audioFx, setAudioFxState] = useState<AudioFxState>(() =>
     readStoredJson<AudioFxState>('ryotunes_audio_fx', DEFAULT_FX)
   );
-  const [spectrumPoints, setSpectrumPoints] = useState<number[]>(() => new Array(40).fill(0));
   const [osdVisible, setOsdVisible] = useState<boolean>(false);
   const [toast, setToast] = useState<ToastMessage | null>(null);
+
+  const spectrumRef = useRef<number[]>(new Array(40).fill(0));
+  const spectrumListenersRef = useRef<Set<(pts: number[]) => void>>(new Set());
+  const getSpectrumPoints = useCallback(() => spectrumRef.current, []);
+  const subscribeSpectrum = useCallback((cb: (pts: number[]) => void) => {
+    spectrumListenersRef.current.add(cb);
+    return () => {
+      spectrumListenersRef.current.delete(cb);
+    };
+  }, []);
+  const publishSpectrum = useCallback((pts: number[]) => {
+    spectrumRef.current = pts;
+    spectrumListenersRef.current.forEach((cb) => cb(pts));
+  }, []);
 
   const audioElRef = useRef<HTMLAudioElement | null>(null);
   const webCtxRef = useRef<AudioContext | null>(null);
@@ -580,7 +622,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const h2 = await RyotunesNativeMedia.addListener('spectrum', (ev) => {
         if (!active) return;
         if (Array.isArray(ev.bands) && ev.bands.length === 40) {
-          setSpectrumPoints(ev.bands);
+          publishSpectrum(ev.bands);
         }
       });
       const h3 = await RyotunesNativeMedia.addListener('playbackError', (ev) => {
@@ -976,13 +1018,13 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     (index: number) => {
       if (index < 0 || index >= queue.length) return;
       const target = queue[index];
-      const offlineHit = offlineTracks.find((o) => o.id === target.id);
+      const offlineHit = offlineMap.get(target.id) || (target.originalId ? offlineMap.get(target.originalId) : undefined);
       const cachedHit = !offlineHit && !target.src ? prefetchCacheRef.current.get(target.id) : undefined;
       const effectiveTrack = offlineHit || cachedHit || target;
       setQueueIndex(index);
       activateTrackInQueue(effectiveTrack, queue);
     },
-    [queue, offlineTracks, activateTrackInQueue]
+    [queue, offlineMap, activateTrackInQueue]
   );
 
   const next = useCallback(() => {
@@ -1099,7 +1141,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           nextPts[i] = prevPts[i] * 0.42 + weighted * 0.58;
         }
         prevSpectrumRef.current = nextPts;
-        setSpectrumPoints(nextPts);
+        publishSpectrum(nextPts);
         raf = requestAnimationFrame(tick);
       } else {
         let anyActive = false;
@@ -1109,14 +1151,14 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           return n > 4 ? n : 0;
         });
         prevSpectrumRef.current = decayed;
-        setSpectrumPoints(decayed);
+        publishSpectrum(decayed);
         if (anyActive) raf = requestAnimationFrame(tick);
       }
     };
 
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [isPlaying, usingNativePlayer]);
+  }, [isPlaying, usingNativePlayer, publishSpectrum]);
 
   const togglePlay = useCallback(() => {
     hasUserActionRef.current = true;
@@ -1146,7 +1188,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const playTrack = useCallback(
     (track: Track, customQueue?: Track[]) => {
-      const offlineHit = offlineTracks.find((o) => o.id === track.id);
+      const offlineHit = offlineMap.get(track.id) || (track.originalId ? offlineMap.get(track.originalId) : undefined);
       const cachedHit = !offlineHit && !track.src ? prefetchCacheRef.current.get(track.id) : undefined;
       const effectiveTrack = offlineHit || cachedHit || track;
       const baseList = customQueue && customQueue.length > 0 ? customQueue : tracks;
@@ -1173,7 +1215,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setQueueIndex(idx);
       activateTrackInQueue(effectiveTrack, list);
     },
-    [tracks, offlineTracks, activateTrackInQueue]
+    [tracks, offlineMap, activateTrackInQueue]
   );
 
   const seek = useCallback(
@@ -1351,12 +1393,12 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const downloadTrack = useCallback(
     async (track: Track) => {
-      if (track.offline || track.source === 'local') {
-        showToast('Track is already saved locally', 'info');
+      if (isTrackOffline(track.id) || track.offline || track.source === 'local') {
+        showToast('Guardado en Offline', 'info');
         return;
       }
       if (downloadProgress[track.id] !== undefined && downloadProgress[track.id] < 100) {
-        showToast(`Already downloading "${track.title}"`, 'info');
+        showToast(`Descargando "${track.title}"…`, 'info');
         return;
       }
       setDownloadProgress((prev) => ({ ...prev, [track.id]: 5 }));
@@ -1364,9 +1406,24 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const saved = await downloadTrackOffline(track, audioQuality, (pct) => {
           setDownloadProgress((prev) => ({ ...prev, [track.id]: pct }));
         });
-        setOfflineTracks((prev) => [saved, ...prev.filter((t) => t.id !== saved.id)]);
+        const syncedSaved: Track = {
+          ...saved,
+          originalId: saved.originalId || track.id,
+          offline: true,
+        };
+        setOfflineTracks((prev) => [
+          syncedSaved,
+          ...prev.filter((t) => t.id !== syncedSaved.id && t.id !== track.id && t.originalId !== track.id),
+        ]);
+        setOnlineTracks((prev) =>
+          prev.map((t) =>
+            t.id === track.id || t.id === syncedSaved.id
+              ? { ...t, src: syncedSaved.src, mimeType: syncedSaved.mimeType, offline: true, offlinePath: syncedSaved.offlinePath }
+              : t
+          )
+        );
         setDownloadProgress((prev) => ({ ...prev, [track.id]: 100 }));
-        showToast(`Saved offline: "${saved.title}"`, 'success');
+        showToast('Guardado en Offline', 'success');
       } catch (err) {
         setDownloadProgress((prev) => {
           const copy = { ...prev };
@@ -1376,12 +1433,12 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         showToast(err instanceof Error ? err.message : `Failed saving "${track.title}"`, 'error');
       }
     },
-    [audioQuality, downloadProgress, showToast]
+    [audioQuality, downloadProgress, isTrackOffline, showToast]
   );
 
   const downloadTracksBatch = useCallback(
     async (tracksToSave: Track[], label = 'collection') => {
-      const candidates = tracksToSave.filter((t) => !t.offline && t.source !== 'local');
+      const candidates = tracksToSave.filter((t) => !isTrackOffline(t.id) && !t.offline && t.source !== 'local');
       if (candidates.length === 0) {
         showToast(`All ${label} tracks are already available offline`, 'info');
         return;
@@ -1398,13 +1455,13 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
       showToast(`Offline ${label}: ${savedCount}/${candidates.length} saved`, savedCount > 0 ? 'success' : 'error');
     },
-    [downloadTrack, showToast]
+    [downloadTrack, isTrackOffline, showToast]
   );
 
   const removeOffline = useCallback(
     async (trackId: string) => {
       await removeOfflineTrack(trackId);
-      setOfflineTracks((prev) => prev.filter((t) => t.id !== trackId));
+      setOfflineTracks((prev) => prev.filter((t) => t.id !== trackId && t.originalId !== trackId));
       setDownloadProgress((prev) => {
         const copy = { ...prev };
         delete copy[trackId];
@@ -1453,7 +1510,10 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         albums,
         artists,
         audioFx,
-        spectrumPoints,
+        spectrumPoints: spectrumRef.current,
+        getSpectrumPoints,
+        subscribeSpectrum,
+        isTrackOffline,
         osdVisible,
         toast,
         playTrack,

@@ -7,24 +7,31 @@ import androidx.media3.common.C
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.TransferListener
 import kotlin.math.min
 
 /**
  * Shared Media3 DataSource wrapper that automatically splits googlevideo.com streams
- * into bounded 512KB HTTP Range chunks (preventing HTTP 403 from YouTube's iOS client
+ * into bounded 512KB HTTP Range chunks (matching VISIONOS / IOS InnerTube User-Agents
  * and preserving Range headers across CDN 302 redirects), while passing other URLs straight through.
  */
 @OptIn(UnstableApi::class)
 internal class ChunkedGoogleVideoDataSource(
-    private val upstream: HttpDataSource
+    private val fallbackUpstream: HttpDataSource
 ) : DataSource {
 
     companion object {
         private const val CHUNK_SIZE = 512L * 1024L
+        const val UA_VISIONOS =
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
+        const val UA_IOS =
+            "com.google.ios.youtube/21.26.4 (iPhone16,2; U; CPU iOS 18_2 like Mac OS X;)"
     }
 
+    private var activeUpstream: HttpDataSource = fallbackUpstream
+    private var attachedListener: TransferListener? = null
     private var isChunkedMode = false
     private var upstreamOpened = false
     private var rootSpec: DataSpec? = null
@@ -35,18 +42,38 @@ internal class ChunkedGoogleVideoDataSource(
     private var chunkRemaining = 0L
 
     override fun addTransferListener(transferListener: TransferListener) {
-        upstream.addTransferListener(transferListener)
+        attachedListener = transferListener
+        fallbackUpstream.addTransferListener(transferListener)
+    }
+
+    private fun pickUpstreamForUri(uri: Uri): HttpDataSource {
+        val isGoogleVideo = uri.host?.contains("googlevideo.com", ignoreCase = true) == true
+        if (!isGoogleVideo) return fallbackUpstream
+        val clientParam = uri.getQueryParameter("c")
+        val targetUa = when {
+            clientParam.equals("VISIONOS", ignoreCase = true) -> UA_VISIONOS
+            clientParam.equals("IOS", ignoreCase = true) -> UA_IOS
+            else -> return fallbackUpstream
+        }
+        return DefaultHttpDataSource.Factory()
+            .setUserAgent(targetUa)
+            .setConnectTimeoutMs(10_000)
+            .setReadTimeoutMs(15_000)
+            .setAllowCrossProtocolRedirects(true)
+            .createDataSource()
+            .also { ds -> attachedListener?.let { ds.addTransferListener(it) } }
     }
 
     override fun open(dataSpec: DataSpec): Long {
         rootSpec = dataSpec
         openedUri = dataSpec.uri
-        val isIosFallbackStream =
-            dataSpec.uri.host?.contains("googlevideo.com", ignoreCase = true) == true &&
-                dataSpec.uri.getQueryParameter("c").equals("IOS", ignoreCase = true)
-        isChunkedMode = isIosFallbackStream
+        activeUpstream = pickUpstreamForUri(dataSpec.uri)
+        val isGoogleVideo = dataSpec.uri.host?.contains("googlevideo.com", ignoreCase = true) == true
+        val clientParam = dataSpec.uri.getQueryParameter("c")
+        isChunkedMode = isGoogleVideo &&
+            (clientParam.equals("IOS", ignoreCase = true) || clientParam.equals("VISIONOS", ignoreCase = true))
         if (!isChunkedMode) {
-            val len = upstream.open(dataSpec)
+            val len = activeUpstream.open(dataSpec)
             upstreamOpened = true
             return len
         }
@@ -87,11 +114,11 @@ internal class ChunkedGoogleVideoDataSource(
             .build()
 
         return try {
-            val opened = upstream.open(subSpec)
+            val opened = activeUpstream.open(subSpec)
             upstreamOpened = true
             if (totalKnownLen <= 0L) {
-                val cr = upstream.responseHeaders["Content-Range"]?.firstOrNull()
-                    ?: upstream.responseHeaders["content-range"]?.firstOrNull()
+                val cr = activeUpstream.responseHeaders["Content-Range"]?.firstOrNull()
+                    ?: activeUpstream.responseHeaders["content-range"]?.firstOrNull()
                 val parsedTotal = cr?.substringAfter('/', "")?.toLongOrNull()
                 if (parsedTotal != null && parsedTotal > 0L) {
                     totalKnownLen = parsedTotal
@@ -111,7 +138,7 @@ internal class ChunkedGoogleVideoDataSource(
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
         if (!isChunkedMode) {
-            return upstream.read(buffer, offset, length)
+            return activeUpstream.read(buffer, offset, length)
         }
         if (length == 0) return 0
 
@@ -126,7 +153,7 @@ internal class ChunkedGoogleVideoDataSource(
             }
 
             val toRead = min(length.toLong(), chunkRemaining).toInt().coerceAtLeast(1)
-            val n = upstream.read(buffer, offset, toRead)
+            val n = activeUpstream.read(buffer, offset, toRead)
             if (n == C.RESULT_END_OF_INPUT) {
                 chunkRemaining = 0L
                 closeUpstreamSafe()
@@ -147,9 +174,9 @@ internal class ChunkedGoogleVideoDataSource(
         }
     }
 
-    override fun getUri(): Uri? = if (isChunkedMode) openedUri else upstream.uri
+    override fun getUri(): Uri? = if (isChunkedMode) openedUri else activeUpstream.uri
 
-    override fun getResponseHeaders(): Map<String, List<String>> = upstream.responseHeaders
+    override fun getResponseHeaders(): Map<String, List<String>> = activeUpstream.responseHeaders
 
     override fun close() {
         openedUri = null
@@ -160,7 +187,7 @@ internal class ChunkedGoogleVideoDataSource(
     private fun closeUpstreamSafe() {
         if (upstreamOpened) {
             try {
-                upstream.close()
+                activeUpstream.close()
             } finally {
                 upstreamOpened = false
             }
