@@ -235,7 +235,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
     >
       <div>
         <div className="font-mono-tech" style={{ fontSize: 10, color: 'var(--ink-faint)', letterSpacing: 1.4 }}>
-          力 // RYOTUNES SETTINGS {decor === 'rich' ? '· 設定' : ''}
+          力 // CTHz SETTINGS {decor === 'rich' ? '· 設定' : ''}
         </div>
         <h1 className="font-display-ryo" style={{ margin: '4px 0 0', fontSize: 32, color: 'var(--ink)' }}>
           Personalization &amp; Audio
@@ -1051,7 +1051,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
           <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <span className="font-ndot" style={{ fontSize: 13, color: 'var(--ink)', letterSpacing: 1 }}>
-                RYOTUNES MOBILE
+                CTHz MOBILE
               </span>
               <span
                 className="font-mono-tech"

@@ -149,8 +149,8 @@ class RyotunesBentoWidgetProvider : AppWidgetProvider() {
         private fun readCachedState(context: Context): WidgetState {
             val p = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             return WidgetState(
-                title = p.getString("title", "OPEN RYOTUNES") ?: "OPEN RYOTUNES",
-                artist = p.getString("artist", "NOTHING × RYOKU PURPLE") ?: "NOTHING × RYOKU PURPLE",
+                title = p.getString("title", "OPEN CTHz") ?: "OPEN CTHz",
+                artist = p.getString("artist", "CTHz // HI-FI AUDIO") ?: "CTHz // HI-FI AUDIO",
                 isPlaying = p.getBoolean("isPlaying", false),
                 positionSec = p.getFloat("position", 0f).toDouble(),
                 durationSec = p.getFloat("duration", 0f).toDouble(),
@@ -261,12 +261,12 @@ class RyotunesBentoWidgetProvider : AppWidgetProvider() {
                 letterSpacing = 0.08f
                 color = if (state.isPlaying) Color.parseColor("#E9D5FF") else Color.parseColor("#9D91B8")
             }
-            val headerText = if (state.isPlaying) "PLAYING // RYOTUNES" else "STANDBY // RYOTUNES"
+            val headerText = if (state.isPlaying) "PLAYING // CTHz" else "STANDBY // CTHz"
             val hFm = headerPaint.fontMetrics
             canvas.drawText(headerText, contentLeft + 18f * u, headerY - (hFm.ascent + hFm.descent) / 2f, headerPaint)
 
-            // Top-right [ ⊙ RYOTUNES ↗ ] chip
-            val chipW = 136f * u
+            // Top-right [ ⊙ CTHz ↗ ] chip
+            val chipW = 104f * u
             val chipH = 26f * u
             val chipRect = RectF(contentRight - chipW, headerY - chipH / 2f, contentRight, headerY + chipH / 2f)
             paint.style = Paint.Style.FILL
@@ -285,7 +285,7 @@ class RyotunesBentoWidgetProvider : AppWidgetProvider() {
                 textAlign = Paint.Align.CENTER
             }
             val cFm = chipTextPaint.fontMetrics
-            canvas.drawText("⊙ RYOTUNES ↗", chipRect.centerX(), chipRect.centerY() - (cFm.ascent + cFm.descent) / 2f, chipTextPaint)
+            canvas.drawText("⊙ CTHz ↗", chipRect.centerX(), chipRect.centerY() - (cFm.ascent + cFm.descent) / 2f, chipTextPaint)
 
             // 4. Center Row: True Square Artwork + Metadata + Wave & 26x5 Dot-Matrix LEDs
             val artSize = hf * 0.40f

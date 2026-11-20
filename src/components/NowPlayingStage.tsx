@@ -52,7 +52,7 @@ export const NowPlayingStage: React.FC<NowPlayingStageProps> = ({
 
   const liked = likedIds.includes(currentTrack.id);
   const fraction = duration > 0 ? position / duration : 0;
-  const provLabel = (currentTrack.provider || currentTrack.source || 'RYOTUNES').toUpperCase();
+  const provLabel = (currentTrack.provider || currentTrack.source || 'CTHz').toUpperCase();
 
   const handleArtTap = () => {
     setFlash(isPlaying ? 'pause' : 'play');

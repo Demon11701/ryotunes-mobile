@@ -24,8 +24,8 @@ android {
         applicationId "dev.ryoku.ryotunes"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 135
-        versionName "1.3.0-beta.6"
+        versionCode 136
+        versionName "1.3.0-beta.7"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.

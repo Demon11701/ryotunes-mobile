@@ -10,13 +10,13 @@ fi
 RAW_VERSION="$1"
 VERSION="${RAW_VERSION#v}"
 VERSION="${VERSION#V}"
-NOTES="${2:-Actualización Ryotunes Mobile v${VERSION}}"
+NOTES="${2:-Actualización CTHz v${VERSION}}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 GRADLE_FILE="$ROOT_DIR/android/app/build.gradle"
 PACKAGE_JSON="$ROOT_DIR/package.json"
-APK_OUT="$ROOT_DIR/Ryotunes-Bento-release.apk"
+APK_OUT="$ROOT_DIR/CTHz-release.apk"
 
 cd "$ROOT_DIR"
 
@@ -76,7 +76,7 @@ git push origin main
 
 echo "==> [6/6] Publicando GitHub Release v${VERSION} (OTA estable sin --prerelease)..."
 gh release create "v${VERSION}" "$APK_OUT" \
-  --title "Ryotunes Mobile v${VERSION}" \
+  --title "CTHz v${VERSION}" \
   --notes "$NOTES"
 
-echo "✅ Publicado Ryotunes Mobile v${VERSION}. Todos los teléfonos con la app recibirán la actualización OTA."
+echo "✅ Publicado CTHz v${VERSION}. Todos los teléfonos con la app recibirán la actualización OTA."

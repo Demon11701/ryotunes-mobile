@@ -179,7 +179,7 @@ export const BentoPlayerCard: React.FC<BentoPlayerCardProps> = ({
               whiteSpace: 'nowrap',
             }}
           >
-            {isPlaying ? 'PLAYING // RYOTUNES' : 'STANDBY // RYOTUNES'}
+            {isPlaying ? 'PLAYING // CTHz' : 'STANDBY // CTHz'}
           </span>
 
           <div style={{ flex: 1 }} />

@@ -828,8 +828,8 @@ class RyotunesAudioService : Service() {
         }
 
         val metadata = MediaMetadataCompat.Builder()
-            .putString(MediaMetadataCompat.METADATA_KEY_TITLE, track?.title ?: "Ryotunes")
-            .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, track?.artist ?: "Nothing × Ryoku Purple")
+            .putString(MediaMetadataCompat.METADATA_KEY_TITLE, track?.title ?: "CTHz")
+            .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, track?.artist ?: "CTHz Hi-Fi")
             .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, track?.album ?: "Local Device")
             .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durMs)
             .apply {
@@ -899,9 +899,9 @@ class RyotunesAudioService : Service() {
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_ryo_notif)
-            .setContentTitle(track?.title ?: "Ryotunes")
-            .setContentText(track?.artist ?: "Nothing × Ryoku Purple")
-            .setSubText("RYOTUNES // ${(track?.format ?: "AUDIO").uppercase()}")
+            .setContentTitle(track?.title ?: "CTHz")
+            .setContentText(track?.artist ?: "CTHz Hi-Fi")
+            .setSubText("CTHz // ${(track?.format ?: "AUDIO").uppercase()}")
             .setLargeIcon(cachedArtBitmap)
             .setContentIntent(contentPending)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
@@ -941,10 +941,10 @@ class RyotunesAudioService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "Ryotunes Playback",
+                "CTHz Playback",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Media playback controls & lock screen telemetry"
+                description = "CTHz media playback controls & lock screen telemetry"
                 setShowBadge(false)
             }
             notificationManager.createNotificationChannel(channel)

@@ -284,7 +284,7 @@ const RyotunesShell: React.FC = () => {
                   : '02 · EXPLORE // HOME'
                 : activeTab === 'library'
                 ? `03 · LIBRARY // ${libSubPage.toUpperCase()}`
-                : '04 · STUDIO // RYOTUNES'}
+                : '04 · STUDIO // CTHz'}
             </span>
 
             <div style={{ flex: 1 }} />

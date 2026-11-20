@@ -2,7 +2,7 @@ import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
   appId: 'dev.ryoku.ryotunes',
-  appName: 'Ryotunes',
+  appName: 'CTHz',
   webDir: 'dist',
   backgroundColor: '#0B0910',
   android: {

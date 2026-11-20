@@ -155,23 +155,26 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
               width: 40,
               height: 40,
               borderRadius: 'var(--radius)',
-              backgroundColor: 'var(--paper-lift)',
+              backgroundColor: '#000000',
               border: '1px solid var(--line-soft)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              fontSize: 22,
-              color: 'var(--ink)',
+              overflow: 'hidden',
             }}
           >
-            力
+            <img
+              src="./icons/cthz.png"
+              alt="CTHz"
+              style={{ width: 34, height: 34, objectFit: 'contain', display: 'block' }}
+            />
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="font-ndot" style={{ fontSize: 14, color: 'var(--ink)', letterSpacing: 1.6 }}>
-              RYOTUNES
+            <div className="font-ndot" style={{ fontSize: 15, color: 'var(--ink)', letterSpacing: 1.6 }}>
+              CTHz
             </div>
             <div className="font-mono-tech" style={{ fontSize: 9.5, color: 'var(--ink-faint)', letterSpacing: 1.4 }}>
-              RYOKU // MUSIC
+              CTHz // HI-FI AUDIO
             </div>
           </div>
           <button

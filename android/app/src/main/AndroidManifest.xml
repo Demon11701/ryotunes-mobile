@@ -79,7 +79,7 @@
         <receiver
             android:name=".RyotunesBentoWidgetProvider"
             android:exported="true"
-            android:label="Ryotunes Bento">
+            android:label="CTHz Bento">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
                 <action android:name="dev.ryoku.ryotunes.WIDGET_ACTION" />

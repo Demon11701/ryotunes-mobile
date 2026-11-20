@@ -92,7 +92,7 @@ export const WelcomeModal: React.FC<WelcomeModalProps> = ({ open, onFinish }) =>
               color: bentoTokens.accentLavender,
             }}
           >
-            ● RYOTUNES // SETUP 0{step}/02
+            ● CTHz // SETUP 0{step}/02
           </span>
           <button
             type="button"
@@ -135,7 +135,7 @@ export const WelcomeModal: React.FC<WelcomeModalProps> = ({ open, onFinish }) =>
           <>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <h2 className="font-display-ryo" style={{ margin: 0, fontSize: 25, color: bentoTokens.ink }}>
-                Bienvenido a Ryotunes
+                Bienvenido a CTHz
               </h2>
               <p style={{ margin: 0, fontSize: 13, color: bentoTokens.muted, lineHeight: 1.5 }}>
                 Reproductor Hi-Fi con streaming multi-plataforma, descargas offline y espectro en vivo.

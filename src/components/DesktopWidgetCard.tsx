@@ -96,7 +96,7 @@ export const DesktopWidgetCard: React.FC<DesktopWidgetCardProps> = ({ onOpenLibr
               color: isPlaying ? bentoTokens.accent : bentoTokens.muted,
             }}
           >
-            {isPlaying ? 'REC · RYOTUNES' : 'STANDBY · NOTHING OS'}
+            {isPlaying ? 'REC · CTHz' : 'STANDBY · CTHz'}
           </span>
           <button
             type="button"
@@ -143,7 +143,7 @@ export const DesktopWidgetCard: React.FC<DesktopWidgetCardProps> = ({ onOpenLibr
             whiteSpace: 'nowrap',
           }}
         >
-          {currentTrack?.artist || 'OPEN RYOTUNES OR START PLAYBACK'}
+          {currentTrack?.artist || 'OPEN CTHz OR START PLAYBACK'}
         </div>
 
         <InstrumentScale
