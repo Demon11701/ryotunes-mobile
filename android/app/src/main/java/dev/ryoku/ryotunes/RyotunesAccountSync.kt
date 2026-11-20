@@ -60,19 +60,74 @@ object RyotunesAccountSync {
         return result
     }
 
-    fun importPlaylistByUrl(context: Context, rawUrl: String): JSObject {
-        val url = rawUrl.trim()
-        if (url.isBlank()) throw IllegalArgumentException("Pega un enlace de playlist válido")
-        val normalized = if (url.startsWith("http://") || url.startsWith("https://")) url else "https://$url"
+    private val ALLOWED_PLAYLIST_IMPORT_HOSTS = setOf(
+        "open.spotify.com",
+        "spotify.link",
+        "music.youtube.com",
+        "youtube.com",
+        "www.youtube.com",
+        "m.youtube.com",
+        "youtu.be",
+        "soundcloud.com",
+        "www.soundcloud.com",
+        "m.soundcloud.com",
+        "on.soundcloud.com",
+        "tidal.com",
+        "www.tidal.com",
+        "listen.tidal.com"
+    )
+
+    private fun isPrivateOrNumericHost(host: String): Boolean {
+        val h = host.lowercase().trim()
+        if (h.isBlank() || h == "localhost" || h.endsWith(".local") || h.endsWith(".internal")) return true
+        if (h.contains(':') || h.startsWith("[")) return true // IPv6 literal
+        if (Regex("^\\d+\\.\\d+\\.\\d+\\.\\d+$").matches(h)) return true // IPv4 literal
+        return false
+    }
+
+    private fun validatePlaylistImportUrl(rawUrl: String): Pair<Uri, String> {
+        val trimmed = rawUrl.trim()
+        if (trimmed.isBlank()) throw IllegalArgumentException("Pega un enlace de playlist válido")
+        if (trimmed.length > 2048 || trimmed.any { it.isISOControl() || it.isWhitespace() }) {
+            throw IllegalArgumentException("Enlace de playlist inválido")
+        }
+        val lower = trimmed.lowercase()
+        // Reject explicit non-HTTPS schemes (http://, file://, content://, javascript:, ftp://, etc.)
+        if (Regex("^[a-z][a-z0-9+.-]*:").containsMatchIn(lower) && !lower.startsWith("https://")) {
+            throw SecurityException("Solo se permiten enlaces HTTPS oficiales")
+        }
+        val normalized = if (lower.startsWith("https://")) trimmed else "https://$trimmed"
         val uri = Uri.parse(normalized)
+        if (!uri.scheme.equals("https", ignoreCase = true)) {
+            throw SecurityException("Solo se permiten enlaces HTTPS oficiales")
+        }
+        if (!uri.userInfo.isNullOrBlank()) {
+            throw SecurityException("El enlace contiene credenciales no permitidas")
+        }
+        if (uri.port != -1 && uri.port != 443) {
+            throw SecurityException("Puerto no permitido en enlace de playlist")
+        }
+        val host = uri.host?.lowercase()?.trim().orEmpty()
+        if (isPrivateOrNumericHost(host) || host !in ALLOWED_PLAYLIST_IMPORT_HOSTS) {
+            throw SecurityException("Dominio no permitido. Usa enlaces HTTPS oficiales de Spotify, YouTube Music, SoundCloud o TIDAL.")
+        }
+        return uri to normalized
+    }
+
+    fun importPlaylistByUrl(context: Context, rawUrl: String): JSObject {
+        val (uri, normalized) = validatePlaylistImportUrl(rawUrl)
         val host = (uri.host ?: "").lowercase()
 
-        return when {
-            host.contains("youtube.com") || host == "youtu.be" -> importYouTubePlaylistUrl(context, uri)
-            host.contains("spotify.com") -> importSpotifyPlaylistUrl(context, uri)
-            host.contains("soundcloud.com") || host.contains("snd.sc") -> importSoundCloudPlaylistUrl(normalized)
-            host.contains("tidal.com") -> importTidalPlaylistUrl(context, uri)
-            else -> throw IllegalArgumentException("Solo se admiten enlaces de YouTube Music, Spotify, SoundCloud o TIDAL")
+        return when (host) {
+            "music.youtube.com", "youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be" ->
+                importYouTubePlaylistUrl(context, uri)
+            "open.spotify.com", "spotify.link" ->
+                importSpotifyPlaylistUrl(context, uri)
+            "soundcloud.com", "www.soundcloud.com", "m.soundcloud.com", "on.soundcloud.com" ->
+                importSoundCloudPlaylistUrl(normalized)
+            "tidal.com", "www.tidal.com", "listen.tidal.com" ->
+                importTidalPlaylistUrl(context, uri)
+            else -> throw SecurityException("Dominio no permitido para importación de playlists")
         }
     }
 
@@ -417,6 +472,7 @@ object RyotunesAccountSync {
         val likedJsonRef = AtomicReference("")
         val domPlaylistsRef = AtomicReference("")
         val drmBlockedRef = AtomicReference(false)
+        val currentHeadlessUrl = AtomicReference("")
         val webViewRef = AtomicReference<WebView?>(null)
         val mainHandler = Handler(Looper.getMainLooper())
         var released = false
@@ -449,8 +505,15 @@ object RyotunesAccountSync {
                     domStorageEnabled = true
                     @Suppress("DEPRECATION")
                     databaseEnabled = true
+                    allowFileAccess = false
+                    allowContentAccess = false
+                    @Suppress("DEPRECATION")
+                    allowFileAccessFromFileURLs = false
+                    @Suppress("DEPRECATION")
+                    allowUniversalAccessFromFileURLs = false
+                    setGeolocationEnabled(false)
                     mediaPlaybackRequiresUserGesture = false
-                    mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                    mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                     userAgentString = RyotunesAccountAuthActivity.buildCleanDesktopUa(context)
                     RyotunesAccountAuthActivity.suppressRequestedWithHeader(this)
                 }
@@ -547,20 +610,29 @@ object RyotunesAccountSync {
                 wv.addJavascriptInterface(object {
                     @JavascriptInterface
                     fun onCapturedHeaders(bearer: String?, clientToken: String?) {
-                        onCaptured(bearer?.trim().orEmpty(), clientToken?.trim().orEmpty())
+                        if (!RyotunesAccountAuthActivity.isExpectedProviderOrigin(currentHeadlessUrl.get(), "spotify")) return
+                        val tok = bearer?.trim().orEmpty()
+                        val ct = clientToken?.trim().orEmpty()
+                        if (tok.length > 8192 || ct.length > 8192) return
+                        onCaptured(tok, ct)
                     }
 
                     @JavascriptInterface
                     fun onCapturedTokenJson(token: String?, isAnonymous: Boolean) {
-                        if (!isAnonymous) {
-                            onCaptured(token?.trim().orEmpty(), "")
-                        }
+                        if (isAnonymous) return
+                        if (!RyotunesAccountAuthActivity.isExpectedProviderOrigin(currentHeadlessUrl.get(), "spotify")) return
+                        val tok = token?.trim().orEmpty()
+                        if (tok.length > 8192) return
+                        onCaptured(tok, "")
                     }
 
                     @JavascriptInterface
                     fun onScrapedLibrary(json: String?) {
+                        if (!RyotunesAccountAuthActivity.isExpectedProviderOrigin(currentHeadlessUrl.get(), "spotify")) return
                         val raw = json?.trim().orEmpty()
-                        if (raw.isNotBlank()) {
+                        if (raw.isNotBlank() &&
+                            raw.toByteArray(Charsets.UTF_8).size <= RyotunesAccountAuthActivity.MAX_BRIDGE_JSON_BYTES
+                        ) {
                             domPlaylistsRef.set(raw)
                             RyotunesAccountVault.saveScrapedLibraryJson(context, "spotify", raw)
                         }
@@ -570,19 +642,32 @@ object RyotunesAccountSync {
                 wv.addJavascriptInterface(object {
                     @JavascriptInterface
                     fun onToken(accessToken: String?, clientToken: String?) {
-                        onCaptured(accessToken?.trim().orEmpty(), clientToken?.trim().orEmpty())
+                        if (!RyotunesAccountAuthActivity.isExpectedProviderOrigin(currentHeadlessUrl.get(), "spotify")) return
+                        val tok = accessToken?.trim().orEmpty()
+                        val ct = clientToken?.trim().orEmpty()
+                        if (tok.length > 8192 || ct.length > 8192) return
+                        onCaptured(tok, ct)
                     }
 
                     @JavascriptInterface
                     fun onExtracted(plJson: String?, likedJson: String?, domJson: String?) {
-                        if (!plJson.isNullOrBlank()) playlistsJsonRef.set(plJson)
-                        if (!likedJson.isNullOrBlank()) likedJsonRef.set(likedJson)
-                        if (!domJson.isNullOrBlank() && domJson != "[]") domPlaylistsRef.set(domJson)
+                        if (!RyotunesAccountAuthActivity.isExpectedProviderOrigin(currentHeadlessUrl.get(), "spotify")) return
+                        val max = RyotunesAccountAuthActivity.MAX_BRIDGE_JSON_BYTES
+                        if (!plJson.isNullOrBlank() && plJson.toByteArray(Charsets.UTF_8).size <= max) {
+                            playlistsJsonRef.set(plJson)
+                        }
+                        if (!likedJson.isNullOrBlank() && likedJson.toByteArray(Charsets.UTF_8).size <= max) {
+                            likedJsonRef.set(likedJson)
+                        }
+                        if (!domJson.isNullOrBlank() && domJson != "[]" && domJson.toByteArray(Charsets.UTF_8).size <= max) {
+                            domPlaylistsRef.set(domJson)
+                        }
                         finishOnce()
                     }
 
                     @JavascriptInterface
                     fun onDrmBlocked() {
+                        if (!RyotunesAccountAuthActivity.isExpectedProviderOrigin(currentHeadlessUrl.get(), "spotify")) return
                         drmBlockedRef.set(true)
                         finishOnce()
                     }
@@ -591,6 +676,11 @@ object RyotunesAccountSync {
                 RyotunesAccountAuthActivity.installSpotifyDocumentStartHook(wv)
 
                 wv.webViewClient = object : WebViewClient() {
+                    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                        val urlStr = request?.url?.toString() ?: return true
+                        return !RyotunesAccountAuthActivity.isAllowedAuthUrl(urlStr)
+                    }
+
                     override fun shouldInterceptRequest(
                         view: WebView?,
                         request: WebResourceRequest?
@@ -620,6 +710,7 @@ object RyotunesAccountSync {
 
                     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                         super.onPageStarted(view, url, favicon)
+                        if (url != null) currentHeadlessUrl.set(url)
                         if (url != null && url.contains("open.spotify.com", ignoreCase = true)) {
                             view?.evaluateJavascript(RyotunesAccountAuthActivity.SPOTIFY_DOCUMENT_START_HOOK_JS, null)
                         }
@@ -627,6 +718,7 @@ object RyotunesAccountSync {
 
                     override fun onPageFinished(view: WebView?, url: String?) {
                         super.onPageFinished(view, url)
+                        if (url != null) currentHeadlessUrl.set(url)
                         if (url != null && url.contains("open.spotify.com", ignoreCase = true)) {
                             view?.evaluateJavascript(RyotunesAccountAuthActivity.SPOTIFY_DOCUMENT_START_HOOK_JS, null)
                             if (extractPlaylists) {

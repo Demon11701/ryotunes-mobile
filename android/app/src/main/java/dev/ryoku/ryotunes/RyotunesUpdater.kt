@@ -2,6 +2,8 @@ package dev.ryoku.ryotunes
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -13,11 +15,13 @@ import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.MessageDigest
 
 /**
  * Native GitHub Releases OTA updater for Demon11701/ryotunes-mobile.
- * Supports SemVer + prerelease ordering (e.g. 1.3.0 > 1.3.0-beta.2 > 1.3.0-beta.1),
- * Android 8+ unknown-sources permission handoff, and FileProvider APK installation.
+ * Supports SemVer + prerelease ordering, strict HTTPS origin/redirect allowlisting,
+ * cryptographic APK signer SHA-256 verification against the installed app certificate,
+ * Android 8+ unknown-sources handoff, and FileProvider installation.
  */
 object RyotunesUpdater {
 
@@ -26,6 +30,29 @@ object RyotunesUpdater {
     private const val REPO_LIST_URL =
         "https://api.github.com/repos/Demon11701/ryotunes-mobile/releases?per_page=1"
     private const val GITHUB_UA = "Ryotunes-Mobile"
+    private const val ALLOWED_REPO_PREFIX = "https://github.com/Demon11701/ryotunes-mobile/"
+
+    private fun isAllowedApkUrl(rawUrl: String): Boolean {
+        val urlStr = rawUrl.trim()
+        if (!urlStr.startsWith("https://", ignoreCase = true)) return false
+        val parsed = runCatching { URL(urlStr) }.getOrNull() ?: return false
+        if (!parsed.protocol.equals("https", ignoreCase = true)) return false
+        val host = parsed.host?.lowercase().orEmpty()
+        if (parsed.userInfo != null) return false
+        if (parsed.port != -1 && parsed.port != 443) return false
+        return when (host) {
+            "github.com" -> urlStr.startsWith(ALLOWED_REPO_PREFIX)
+            "objects.githubusercontent.com",
+            "release-assets.githubusercontent.com" -> true
+            else -> false
+        }
+    }
+
+    private fun assertAllowedApkUrl(rawUrl: String) {
+        if (!isAllowedApkUrl(rawUrl)) {
+            throw SecurityException("Origen de descarga OTA no permitido")
+        }
+    }
 
     fun getAppVersionInfo(): JSObject {
         return JSObject().apply {
@@ -65,7 +92,7 @@ object RyotunesUpdater {
             val name = asset.optString("name", "")
             val dlUrl = asset.optString("browser_download_url", "")
             val size = asset.optLong("size", 0L)
-            if (!name.endsWith(".apk", ignoreCase = true) || dlUrl.isBlank()) continue
+            if (!name.endsWith(".apk", ignoreCase = true) || !isAllowedApkUrl(dlUrl)) continue
             if (name.contains("release.apk", ignoreCase = true)) {
                 bestApkUrl = dlUrl
                 bestApkSize = size
@@ -80,7 +107,7 @@ object RyotunesUpdater {
         val finalApkUrl = bestApkUrl.ifBlank { fallbackApkUrl }
         val finalApkSize = if (bestApkUrl.isNotBlank()) bestApkSize else fallbackApkSize
         val hasUpdate = latestVersion.isNotBlank() &&
-            finalApkUrl.isNotBlank() &&
+            isAllowedApkUrl(finalApkUrl) &&
             compareSemVer(latestVersion, currentVersion) > 0
 
         return JSObject().apply {
@@ -94,6 +121,63 @@ object RyotunesUpdater {
         }
     }
 
+    private fun extractSignerSha256Set(info: PackageInfo?): Set<String> {
+        if (info == null) return emptySet()
+        val sigs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val si = info.signingInfo
+            when {
+                si == null -> emptyArray()
+                si.hasMultipleSigners() -> si.apkContentsSigners ?: emptyArray()
+                else -> si.signingCertificateHistory ?: si.apkContentsSigners ?: emptyArray()
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            info.signatures ?: emptyArray()
+        }
+        val md = MessageDigest.getInstance("SHA-256")
+        val hashes = LinkedHashSet<String>()
+        for (sig in sigs) {
+            val digest = md.digest(sig.toByteArray())
+            hashes.add(digest.joinToString("") { "%02x".format(it) })
+        }
+        return hashes
+    }
+
+    private fun verifyDownloadedApkSignature(context: Context, apkFile: File) {
+        val pm = context.packageManager
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            PackageManager.GET_SIGNING_CERTIFICATES
+        } else {
+            @Suppress("DEPRECATION")
+            PackageManager.GET_SIGNATURES
+        }
+
+        val archiveInfo = pm.getPackageArchiveInfo(apkFile.absolutePath, flags)
+            ?: throw SecurityException("No se pudo inspeccionar el APK descargado")
+
+        if (archiveInfo.packageName != context.packageName) {
+            throw SecurityException("El identificador del APK no coincide con ${context.packageName}")
+        }
+
+        val installedInfo = pm.getPackageInfo(context.packageName, flags)
+        val installedHashes = extractSignerSha256Set(installedInfo)
+        val archiveHashes = extractSignerSha256Set(archiveInfo)
+
+        if (installedHashes.isEmpty() || archiveHashes.isEmpty() || installedHashes != archiveHashes) {
+            throw SecurityException("Firma criptográfica del APK inválida. Actualización cancelada por seguridad.")
+        }
+    }
+
+    private fun purgeUpdateApks(updatesDir: File) {
+        runCatching {
+            updatesDir.listFiles()?.forEach { f ->
+                if (f.isFile && f.name.endsWith(".apk", ignoreCase = true)) {
+                    f.delete()
+                }
+            }
+        }
+    }
+
     fun downloadAndInstallUpdate(
         context: Context,
         apkUrl: String,
@@ -102,6 +186,7 @@ object RyotunesUpdater {
         if (apkUrl.isBlank()) {
             throw IllegalArgumentException("Missing APK download URL")
         }
+        assertAllowedApkUrl(apkUrl)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !context.packageManager.canRequestPackageInstalls()) {
             val permIntent = Intent(
@@ -118,11 +203,11 @@ object RyotunesUpdater {
         }
 
         val updatesDir = File(context.cacheDir, "updates").apply { mkdirs() }
+        purgeUpdateApks(updatesDir)
         val apkFile = File(updatesDir, "ryotunes-update.apk")
-        if (apkFile.exists()) runCatching { apkFile.delete() }
 
         onProgress(1)
-        var success = false
+        var verified = false
         try {
             val conn = openFollowingRedirects(apkUrl, 12_000, 30_000)
             try {
@@ -142,7 +227,7 @@ object RyotunesUpdater {
                             fos.write(buf, 0, n)
                             downloaded += n
                             val pct = if (conn.contentLengthLong > 0L) {
-                                ((downloaded * 98L) / total).toInt().coerceIn(2, 99)
+                                ((downloaded * 96L) / total).toInt().coerceIn(2, 97)
                             } else {
                                 minOf(95, 5 + (downloaded / (128 * 1024)).toInt())
                             }
@@ -159,12 +244,15 @@ object RyotunesUpdater {
             }
 
             if (!apkFile.exists() || apkFile.length() <= 1_000_000L) {
-                throw IllegalStateException("Downloaded APK is incomplete (${apkFile.length()} bytes)")
+                throw IllegalStateException("El APK descargado está incompleto (${apkFile.length()} bytes)")
             }
-            success = true
+
+            onProgress(98)
+            verifyDownloadedApkSignature(context, apkFile)
+            verified = true
         } finally {
-            if (!success) {
-                runCatching { apkFile.delete() }
+            if (!verified) {
+                purgeUpdateApks(updatesDir)
             }
         }
 
@@ -259,6 +347,7 @@ object RyotunesUpdater {
     private fun openFollowingRedirects(urlStr: String, connectMs: Int, readMs: Int): HttpURLConnection {
         var currentUrl = urlStr
         for (hop in 0..5) {
+            assertAllowedApkUrl(currentUrl)
             val conn = (URL(currentUrl).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = connectMs
@@ -271,7 +360,9 @@ object RyotunesUpdater {
                 val loc = conn.getHeaderField("Location")
                 conn.disconnect()
                 if (loc.isNullOrBlank()) throw IllegalStateException("Redirect missing Location header")
-                currentUrl = URL(URL(currentUrl), loc).toString()
+                val resolved = URL(URL(currentUrl), loc).toString()
+                assertAllowedApkUrl(resolved)
+                currentUrl = resolved
                 continue
             }
             return conn

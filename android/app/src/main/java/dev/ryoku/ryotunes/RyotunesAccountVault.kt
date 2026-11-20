@@ -1,17 +1,31 @@
 package dev.ryoku.ryotunes
 
 import android.content.Context
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
 import android.webkit.CookieManager
 import android.webkit.WebStorage
 import com.getcapacitor.JSObject
+import java.security.KeyStore
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 
 /**
- * Private on-device account session vault (MODE_PRIVATE SharedPreferences).
+ * Private on-device account session vault (MODE_PRIVATE SharedPreferences) with
+ * hardware-backed Android Keystore AES-256-GCM encryption at rest.
  * Never exposes raw cookies or OAuth tokens to JS or logcat.
  */
 object RyotunesAccountVault {
 
     private const val PREFS_NAME = "ryotunes_accounts_vault"
+    private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
+    private const val MASTER_KEY_ALIAS = "ryotunes_vault_master_key"
+    private const val ENC_PREFIX = "enc:v1:"
+    private const val GCM_IV_LEN_BYTES = 12
+    private const val GCM_TAG_LEN_BITS = 128
 
     data class AccountSession(
         val provider: String,
@@ -23,6 +37,78 @@ object RyotunesAccountVault {
         val clientToken: String = "",
         val tokenCapturedAt: Long = 0L
     )
+
+    // ── Android Keystore AES-256-GCM Helpers ──────────────────────────────────
+
+    @Synchronized
+    private fun getOrCreateMasterKey(): SecretKey {
+        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+        val existing = runCatching { ks.getKey(MASTER_KEY_ALIAS, null) as? SecretKey }.getOrNull()
+        if (existing != null) return existing
+
+        val keyGen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
+        val spec = KeyGenParameterSpec.Builder(
+            MASTER_KEY_ALIAS,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+        )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setKeySize(256)
+            .setRandomizedEncryptionRequired(true)
+            .build()
+        keyGen.init(spec)
+        return keyGen.generateKey()
+    }
+
+    private fun encryptSecret(plain: String): String {
+        if (plain.isEmpty()) return ""
+        return runCatching {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.ENCRYPT_MODE, getOrCreateMasterKey())
+            val iv = cipher.iv
+            val cipherBytes = cipher.doFinal(plain.toByteArray(Charsets.UTF_8))
+            val combined = ByteArray(iv.size + cipherBytes.size)
+            System.arraycopy(iv, 0, combined, 0, iv.size)
+            System.arraycopy(cipherBytes, 0, combined, iv.size, cipherBytes.size)
+            ENC_PREFIX + Base64.encodeToString(combined, Base64.NO_WRAP)
+        }.getOrElse {
+            // Do not crash on broken vendor Keystore; fail safe without leaking plaintext to logs
+            ""
+        }
+    }
+
+    private fun decryptSecret(stored: String?): Pair<String, Boolean> {
+        if (stored.isNullOrEmpty()) return "" to false
+        if (!stored.startsWith(ENC_PREFIX)) {
+            // Transparent legacy plaintext migration flag = true
+            return stored to true
+        }
+        val plain = runCatching {
+            val b64 = stored.removePrefix(ENC_PREFIX)
+            val combined = Base64.decode(b64, Base64.NO_WRAP)
+            if (combined.size <= GCM_IV_LEN_BYTES) return@runCatching ""
+            val iv = combined.copyOfRange(0, GCM_IV_LEN_BYTES)
+            val ct = combined.copyOfRange(GCM_IV_LEN_BYTES, combined.size)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, getOrCreateMasterKey(), GCMParameterSpec(GCM_TAG_LEN_BITS, iv))
+            String(cipher.doFinal(ct), Charsets.UTF_8)
+        }.getOrDefault("")
+        return plain to false
+    }
+
+    /**
+     * Redacts bearer tokens, auth cookies, and session secrets from error messages
+     * before returning them to JS UI or logging.
+     */
+    fun sanitizeErrorMessage(msg: String?): String {
+        if (msg.isNullOrBlank()) return "Error inesperado"
+        return msg
+            .replace(Regex("(?i)Bearer\\s+[A-Za-z0-9._~+/=-]+"), "Bearer [REDACTED]")
+            .replace(Regex("(?i)OAuth\\s+[A-Za-z0-9._~+/=-]+"), "OAuth [REDACTED]")
+            .replace(Regex("(?i)SAPISID(?:1P|3P)?HASH\\s+[A-Za-z0-9_]+"), "SAPISIDHASH [REDACTED]")
+            .replace(Regex("(?i)(sp_dc|sp_key|sp_t|SAPISID|__Secure-3PAPISID|__Secure-1PAPISID|oauth_token|client-token|access_token|accessToken)\\s*[=:]\\s*[^;\\s\"'&,]+"), "$1=[REDACTED]")
+            .take(280)
+    }
 
     fun normalizeProvider(raw: String): String {
         return when (raw.trim().lowercase()) {
@@ -46,18 +132,23 @@ object RyotunesAccountVault {
         val p = normalizeProvider(rawProvider)
         val cleanName = accountName.trim().ifBlank { defaultAccountLabel(p) }
         val now = System.currentTimeMillis()
+        val encCookie = encryptSecret(cookieHeader)
+        val encPrimary = encryptSecret(primaryToken)
+        val encAccess = if (accessToken.isNotBlank()) encryptSecret(accessToken.trim()) else ""
+        val encClient = if (clientToken.isNotBlank()) encryptSecret(clientToken.trim()) else ""
+
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().apply {
             putBoolean("${p}_connected", true)
-            putString("${p}_cookie", cookieHeader)
-            putString("${p}_token", primaryToken)
+            putString("${p}_cookie", encCookie)
+            putString("${p}_token", encPrimary)
             putString("${p}_name", cleanName)
             putLong("${p}_at", now)
-            if (accessToken.isNotBlank()) {
-                putString("${p}_access_token", accessToken.trim())
+            if (encAccess.isNotBlank()) {
+                putString("${p}_access_token", encAccess)
                 putLong("${p}_token_at", now)
             }
-            if (clientToken.isNotBlank()) {
-                putString("${p}_client_token", clientToken.trim())
+            if (encClient.isNotBlank()) {
+                putString("${p}_client_token", encClient)
             }
             apply()
         }
@@ -74,11 +165,17 @@ object RyotunesAccountVault {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().apply {
             if (accessToken.isNotBlank()) {
-                putString("${p}_access_token", accessToken.trim())
-                putLong("${p}_token_at", System.currentTimeMillis())
+                val encAccess = encryptSecret(accessToken.trim())
+                if (encAccess.isNotBlank()) {
+                    putString("${p}_access_token", encAccess)
+                    putLong("${p}_token_at", System.currentTimeMillis())
+                }
             }
             if (clientToken.isNotBlank()) {
-                putString("${p}_client_token", clientToken.trim())
+                val encClient = encryptSecret(clientToken.trim())
+                if (encClient.isNotBlank()) {
+                    putString("${p}_client_token", encClient)
+                }
             }
             apply()
         }
@@ -94,7 +191,7 @@ object RyotunesAccountVault {
 
     fun saveScrapedLibraryJson(context: Context, rawProvider: String, json: String) {
         val p = normalizeProvider(rawProvider)
-        if (json.isBlank()) return
+        if (json.isBlank() || json.length > 2 * 1024 * 1024) return
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString("${p}_scraped_lib", json)
@@ -111,10 +208,23 @@ object RyotunesAccountVault {
         val p = normalizeProvider(rawProvider)
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         if (!prefs.getBoolean("${p}_connected", false)) return null
-        val cookie = prefs.getString("${p}_cookie", "") ?: ""
-        val token = prefs.getString("${p}_token", "") ?: ""
-        val accessToken = prefs.getString("${p}_access_token", "") ?: ""
-        val clientToken = prefs.getString("${p}_client_token", "") ?: ""
+
+        val (cookie, migCookie) = decryptSecret(prefs.getString("${p}_cookie", ""))
+        val (token, migToken) = decryptSecret(prefs.getString("${p}_token", ""))
+        val (accessToken, migAccess) = decryptSecret(prefs.getString("${p}_access_token", ""))
+        val (clientToken, migClient) = decryptSecret(prefs.getString("${p}_client_token", ""))
+
+        // Transparently re-encrypt any legacy plaintext values in-place so existing users stay signed in
+        if (migCookie || migToken || migAccess || migClient) {
+            prefs.edit().apply {
+                if (migCookie && cookie.isNotBlank()) putString("${p}_cookie", encryptSecret(cookie))
+                if (migToken && token.isNotBlank()) putString("${p}_token", encryptSecret(token))
+                if (migAccess && accessToken.isNotBlank()) putString("${p}_access_token", encryptSecret(accessToken))
+                if (migClient && clientToken.isNotBlank()) putString("${p}_client_token", encryptSecret(clientToken))
+                apply()
+            }
+        }
+
         val tokenAt = prefs.getLong("${p}_token_at", 0L)
         if (cookie.isBlank() && token.isBlank() && accessToken.isBlank()) return null
         val name = prefs.getString("${p}_name", defaultAccountLabel(p)) ?: defaultAccountLabel(p)
@@ -224,7 +334,6 @@ object RyotunesAccountVault {
             }
             cm.flush()
 
-            // Clear WebStorage (localStorage / IndexedDB) for provider origins
             runCatching {
                 val ws = WebStorage.getInstance()
                 urls.filter { !it.contains("://.") }.forEach { origin ->

@@ -1,6 +1,7 @@
 package dev.ryoku.ryotunes;
 
 import android.os.Bundle;
+import android.webkit.WebView;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
 import com.getcapacitor.BridgeActivity;
@@ -8,6 +9,7 @@ import com.getcapacitor.BridgeActivity;
 public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG);
         registerPlugin(RyotunesNativeMediaPlugin.class);
         super.onCreate(savedInstanceState);
 

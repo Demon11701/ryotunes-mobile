@@ -499,7 +499,7 @@ class RyotunesNativeMediaPlugin : Plugin(), RyotunesAudioService.ServiceListener
                 val items = RyotunesOnlineResolver.searchOnline(query, provider)
                 call.resolve(JSObject().apply { put("items", items) })
             } catch (e: Exception) {
-                call.reject(e.localizedMessage ?: "Search failed")
+                call.reject(RyotunesAccountVault.sanitizeErrorMessage(e.localizedMessage ?: "Search failed"))
             }
         }
     }
@@ -523,7 +523,7 @@ class RyotunesNativeMediaPlugin : Plugin(), RyotunesAudioService.ServiceListener
                     if (resolved.waveform.isNotEmpty()) put("waveform", wfArr)
                 })
             } catch (e: Exception) {
-                call.reject(e.localizedMessage ?: "Stream resolve failed")
+                call.reject(RyotunesAccountVault.sanitizeErrorMessage(e.localizedMessage ?: "Stream resolve failed"))
             }
         }
     }
@@ -547,13 +547,14 @@ class RyotunesNativeMediaPlugin : Plugin(), RyotunesAudioService.ServiceListener
                 }
                 call.resolve(JSObject().apply { put("track", saved) })
             } catch (e: Exception) {
+                val safeErr = RyotunesAccountVault.sanitizeErrorMessage(e.localizedMessage ?: "Download error")
                 notifyListeners("downloadProgress", JSObject().apply {
                     put("trackId", trackId)
                     put("progress", 0)
                     put("status", "failed")
-                    put("error", e.localizedMessage ?: "Download error")
+                    put("error", safeErr)
                 })
-                call.reject(e.localizedMessage ?: "Offline download failed")
+                call.reject(safeErr)
             }
         }
     }
@@ -659,7 +660,7 @@ class RyotunesNativeMediaPlugin : Plugin(), RyotunesAudioService.ServiceListener
                 val res = RyotunesAccountSync.syncAccountPlaylists(context, provider)
                 call.resolve(res)
             } catch (e: Throwable) {
-                call.reject(e.localizedMessage ?: "No se pudieron sincronizar las playlists")
+                call.reject(RyotunesAccountVault.sanitizeErrorMessage(e.localizedMessage ?: "No se pudieron sincronizar las playlists"))
             }
         }
     }
@@ -676,7 +677,7 @@ class RyotunesNativeMediaPlugin : Plugin(), RyotunesAudioService.ServiceListener
                 val res = RyotunesAccountSync.importPlaylistByUrl(context, url)
                 call.resolve(res)
             } catch (e: Throwable) {
-                call.reject(e.localizedMessage ?: "No se pudo importar la playlist")
+                call.reject(RyotunesAccountVault.sanitizeErrorMessage(e.localizedMessage ?: "No se pudo importar la playlist"))
             }
         }
     }
@@ -694,7 +695,7 @@ class RyotunesNativeMediaPlugin : Plugin(), RyotunesAudioService.ServiceListener
                 val res = RyotunesAccountSync.fetchRemotePlaylistTracks(context, playlistId, provider)
                 call.resolve(res)
             } catch (e: Throwable) {
-                call.reject(e.localizedMessage ?: "No se pudieron cargar las pistas de la playlist")
+                call.reject(RyotunesAccountVault.sanitizeErrorMessage(e.localizedMessage ?: "No se pudieron cargar las pistas de la playlist"))
             }
         }
     }
@@ -706,7 +707,7 @@ class RyotunesNativeMediaPlugin : Plugin(), RyotunesAudioService.ServiceListener
                 val res = RyotunesAccountSync.fetchHomeRecommendations(context)
                 call.resolve(res)
             } catch (e: Throwable) {
-                call.reject(e.localizedMessage ?: "No se pudieron cargar las recomendaciones")
+                call.reject(RyotunesAccountVault.sanitizeErrorMessage(e.localizedMessage ?: "No se pudieron cargar las recomendaciones"))
             }
         }
     }
@@ -725,7 +726,7 @@ class RyotunesNativeMediaPlugin : Plugin(), RyotunesAudioService.ServiceListener
                 val res = RyotunesUpdater.checkGithubUpdate()
                 call.resolve(res)
             } catch (e: Throwable) {
-                call.reject(e.localizedMessage ?: "No se pudo consultar actualizaciones")
+                call.reject(RyotunesAccountVault.sanitizeErrorMessage(e.localizedMessage ?: "No se pudo consultar actualizaciones"))
             }
         }
     }
@@ -748,7 +749,7 @@ class RyotunesNativeMediaPlugin : Plugin(), RyotunesAudioService.ServiceListener
                 }
                 call.resolve(res)
             } catch (e: Throwable) {
-                call.reject(e.localizedMessage ?: "Error al descargar la actualización")
+                call.reject(RyotunesAccountVault.sanitizeErrorMessage(e.localizedMessage ?: "Error al descargar la actualización"))
             }
         }
     }

@@ -8,6 +8,7 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -80,6 +81,45 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
                 ?.ifBlank { "131.0.0.0" }
                 ?: "131.0.0.0"
             return "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$realChromeVersion Safari/537.36"
+        }
+
+        internal const val MAX_BRIDGE_JSON_BYTES = 2 * 1024 * 1024
+
+        private val ALLOWED_AUTH_DOMAIN_SUFFIXES = listOf(
+            "spotify.com",
+            "youtube.com",
+            "google.com",
+            "gstatic.com",
+            "googleapis.com",
+            "soundcloud.com",
+            "tidal.com",
+            "appleid.apple.com",
+            "facebook.com"
+        )
+
+        internal fun isAllowedAuthUrl(rawUrl: String?): Boolean {
+            if (rawUrl.isNullOrBlank()) return false
+            val uri = runCatching { Uri.parse(rawUrl) }.getOrNull() ?: return false
+            if (!uri.scheme.equals("https", ignoreCase = true)) return false
+            val host = uri.host?.lowercase()?.trim().orEmpty()
+            if (host.isBlank()) return false
+            return ALLOWED_AUTH_DOMAIN_SUFFIXES.any { suffix ->
+                host == suffix || host.endsWith(".$suffix")
+            }
+        }
+
+        internal fun isExpectedProviderOrigin(rawUrl: String?, provider: String): Boolean {
+            if (rawUrl.isNullOrBlank()) return false
+            val uri = runCatching { Uri.parse(rawUrl) }.getOrNull() ?: return false
+            if (!uri.scheme.equals("https", ignoreCase = true)) return false
+            val host = uri.host?.lowercase()?.trim().orEmpty()
+            return when (RyotunesAccountVault.normalizeProvider(provider)) {
+                "spotify" -> host == "open.spotify.com"
+                "ytmusic" -> host == "music.youtube.com" || host == "youtube.com" || host.endsWith(".youtube.com")
+                "soundcloud" -> host == "soundcloud.com" || host.endsWith(".soundcloud.com")
+                "tidal" -> host == "listen.tidal.com" || host == "tidal.com" || host.endsWith(".tidal.com")
+                else -> false
+            }
         }
 
         internal fun suppressRequestedWithHeader(settings: WebSettings) {
@@ -459,6 +499,7 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
     private val capturedClientToken = AtomicReference("")
     private val scrapedProfileName = AtomicReference("")
     private val scrapedLibraryJson = AtomicReference("")
+    private val currentWebUrl = AtomicReference("")
     private val finishScheduled = AtomicBoolean(false)
     private val verifyingSpotify = AtomicBoolean(false)
     private var completed = false
@@ -467,8 +508,10 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
         @JavascriptInterface
         fun onCapturedHeaders(bearer: String?, clientToken: String?) {
             if (completed) return
+            if (!isExpectedProviderOrigin(currentWebUrl.get(), provider)) return
             val tok = bearer?.trim().orEmpty()
             val ct = clientToken?.trim().orEmpty()
+            if (tok.length > 8192 || ct.length > 8192) return
 
             if (provider == "spotify") {
                 val (_, spDc) = readSpotifyCookies(CookieManager.getInstance())
@@ -500,8 +543,9 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
         @JavascriptInterface
         fun onCapturedTokenJson(token: String?, isAnonymous: Boolean) {
             if (completed || isAnonymous) return
+            if (!isExpectedProviderOrigin(currentWebUrl.get(), provider)) return
             val tok = token?.trim().orEmpty()
-            if (tok.length <= 24) return
+            if (tok.length <= 24 || tok.length > 8192) return
             if (provider == "spotify") {
                 val (_, spDc) = readSpotifyCookies(CookieManager.getInstance())
                 if (spDc.isBlank()) return
@@ -518,8 +562,10 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
 
         @JavascriptInterface
         fun onScrapedLibrary(json: String?) {
+            if (completed) return
+            if (!isExpectedProviderOrigin(currentWebUrl.get(), provider)) return
             val raw = json?.trim().orEmpty()
-            if (raw.isBlank()) return
+            if (raw.isBlank() || raw.toByteArray(Charsets.UTF_8).size > MAX_BRIDGE_JSON_BYTES) return
             scrapedLibraryJson.set(raw)
             runCatching {
                 val obj = JSONObject(raw)
@@ -675,10 +721,17 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
                 domStorageEnabled = true
                 @Suppress("DEPRECATION")
                 databaseEnabled = true
+                allowFileAccess = false
+                allowContentAccess = false
+                @Suppress("DEPRECATION")
+                allowFileAccessFromFileURLs = false
+                @Suppress("DEPRECATION")
+                allowUniversalAccessFromFileURLs = false
+                setGeolocationEnabled(false)
                 mediaPlaybackRequiresUserGesture = false
                 useWideViewPort = true
                 loadWithOverviewMode = true
-                mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                 userAgentString = cleanMobileUa
                 suppressRequestedWithHeader(this)
             }
@@ -710,13 +763,13 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
 
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                val uri = request?.url ?: return false
-                val scheme = uri.scheme?.lowercase() ?: return false
-                if (scheme != "http" && scheme != "https") return true
+                val uri = request?.url ?: return true
+                val urlStr = uri.toString()
+                // Strict HTTPS-only allowlist (blocks javascript:, file://, content://, and arbitrary domains)
+                if (!isAllowedAuthUrl(urlStr)) return true
 
                 if (provider == "spotify" && view != null) {
                     val host = uri.host?.lowercase().orEmpty()
-                    val urlStr = uri.toString()
                     if (host == "open.spotify.com" && !desktopUaApplied) {
                         desktopUaApplied = true
                         view.settings.userAgentString = cleanDesktopUa
@@ -796,6 +849,7 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
+                if (url != null) currentWebUrl.set(url)
                 if (!completed && provider == "spotify" && url != null && view != null) {
                     val isOpenSpotify = url.contains("://open.spotify.com", ignoreCase = true)
                     if (isOpenSpotify && !desktopUaApplied) {
@@ -815,6 +869,7 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
+                if (url != null) currentWebUrl.set(url)
                 if (!completed && url != null) {
                     if (provider == "spotify" && url.contains("://open.spotify.com", ignoreCase = true)) {
                         titleTv.text = "● VERIFICANDO SESIÓN // SPOTIFY…"
@@ -833,6 +888,7 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
 
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
                 super.doUpdateVisitedHistory(view, url, isReload)
+                if (url != null) currentWebUrl.set(url)
                 if (!completed && url != null) {
                     if (provider == "spotify" && url.contains("://open.spotify.com", ignoreCase = true)) {
                         view?.evaluateJavascript(SPOTIFY_DOCUMENT_START_HOOK_JS, null)
