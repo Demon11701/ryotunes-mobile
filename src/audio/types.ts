@@ -90,6 +90,15 @@ export interface GithubUpdateInfo {
   publishedAt: string;
 }
 
+export interface HomeRecommendationSection {
+  id: string;
+  title: string;
+  subtitle: string;
+  provider: ProviderId;
+  kind: 'tracks' | 'playlists';
+  items: Track[] | Playlist[];
+}
+
 export interface AlbumGroup {
   id: string;
   title: string;

@@ -23,7 +23,15 @@ import { SettingsPage, SettingsTab } from './pages/SettingsPage';
 import { ThemeProvider, useTheme } from './theme/ThemeContext';
 
 const RyotunesShell: React.FC = () => {
-  const { currentTrack, importLocalFiles, syncDeviceLibrary, isNativeAndroid, showToast } = useAudio();
+  const {
+    currentTrack,
+    importLocalFiles,
+    syncDeviceLibrary,
+    isNativeAndroid,
+    showToast,
+    loadingRecommendations,
+    refreshRecommendations,
+  } = useAudio();
   const { bentoTokens } = useTheme();
   const [activeTab, setActiveTab] = useState<MainTab>('stage');
   const [stageCenterMode, setStageCenterMode] = useState<StageCenterMode>('art');
@@ -282,52 +290,77 @@ const RyotunesShell: React.FC = () => {
             <div style={{ flex: 1 }} />
 
             {activeTab === 'explore' && (
-              <div
-                style={{
-                  display: 'flex',
-                  gap: 4,
-                  padding: 2,
-                  borderRadius: 999,
-                  backgroundColor: 'var(--paper-lift)',
-                  border: '1px solid var(--line-soft)',
-                }}
-              >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <button
                   type="button"
-                  onClick={() => setExploreSubView('search')}
+                  disabled={loadingRecommendations}
+                  onClick={() => void refreshRecommendations(true)}
+                  aria-label="Actualizar recomendaciones"
                   className="font-mono-tech ryo-pressable"
                   style={{
-                    height: 24,
-                    padding: '0 9px',
+                    width: 28,
+                    height: 28,
                     borderRadius: 999,
-                    border: 'none',
-                    backgroundColor: exploreSubView === 'search' ? 'var(--bone)' : 'transparent',
-                    color: exploreSubView === 'search' ? 'var(--ink-on-bone)' : 'var(--ink-muted)',
-                    fontSize: 9.5,
-                    fontWeight: 600,
-                    cursor: 'pointer',
+                    border: '1px solid var(--line)',
+                    backgroundColor: 'var(--paper-lift)',
+                    color: loadingRecommendations ? 'var(--accent)' : 'var(--ink)',
+                    fontSize: 13,
+                    fontWeight: 700,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    cursor: loadingRecommendations ? 'wait' : 'pointer',
                   }}
                 >
-                  SEARCH
+                  ↻
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setExploreSubView('home')}
-                  className="font-mono-tech ryo-pressable"
+                <div
                   style={{
-                    height: 24,
-                    padding: '0 9px',
+                    display: 'flex',
+                    gap: 4,
+                    padding: 2,
                     borderRadius: 999,
-                    border: 'none',
-                    backgroundColor: exploreSubView === 'home' ? 'var(--bone)' : 'transparent',
-                    color: exploreSubView === 'home' ? 'var(--ink-on-bone)' : 'var(--ink-muted)',
-                    fontSize: 9.5,
-                    fontWeight: 600,
-                    cursor: 'pointer',
+                    backgroundColor: 'var(--paper-lift)',
+                    border: '1px solid var(--line-soft)',
                   }}
                 >
-                  HOME
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => setExploreSubView('search')}
+                    className="font-mono-tech ryo-pressable"
+                    style={{
+                      height: 24,
+                      padding: '0 9px',
+                      borderRadius: 999,
+                      border: 'none',
+                      backgroundColor: exploreSubView === 'search' ? 'var(--bone)' : 'transparent',
+                      color: exploreSubView === 'search' ? 'var(--ink-on-bone)' : 'var(--ink-muted)',
+                      fontSize: 9.5,
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    SEARCH
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setExploreSubView('home')}
+                    className="font-mono-tech ryo-pressable"
+                    style={{
+                      height: 24,
+                      padding: '0 9px',
+                      borderRadius: 999,
+                      border: 'none',
+                      backgroundColor: exploreSubView === 'home' ? 'var(--bone)' : 'transparent',
+                      color: exploreSubView === 'home' ? 'var(--ink-on-bone)' : 'var(--ink-muted)',
+                      fontSize: 9.5,
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    HOME
+                  </button>
+                </div>
               </div>
             )}
 
@@ -356,7 +389,7 @@ const RyotunesShell: React.FC = () => {
           {/* Active Tab Scroll Content */}
           <div style={{ position: 'relative', flex: 1, minHeight: 0, overflowY: 'auto', padding: '14px 14px 8px' }}>
             {activeTab === 'explore' && exploreSubView === 'search' && (
-              <SearchPage initialQuery={libParam} />
+              <SearchPage initialQuery={libParam} onNavigate={navigateLibrary} />
             )}
             {activeTab === 'explore' && exploreSubView === 'home' && (
               <HomePage onNavigate={navigateLibrary} onOpenBento={() => setActiveTab('stage')} />

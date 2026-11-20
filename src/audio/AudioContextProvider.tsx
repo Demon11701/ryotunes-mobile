@@ -23,6 +23,7 @@ import {
   ArtistGroup,
   AudioFxState,
   AudioQuality,
+  HomeRecommendationSection,
   LyricsDoc,
   Playlist,
   RepeatMode,
@@ -106,15 +107,23 @@ interface AudioContextValue {
   accounts: AccountsMap;
   syncingAccount: AccountProviderId | null;
   importingPlaylistUrl: boolean;
+  homeRecommendations: HomeRecommendationSection[];
+  loadingRecommendations: boolean;
+  loadingPlaylistId: string | null;
   refreshAccounts: () => Promise<AccountsMap>;
   connectAccount: (provider: AccountProviderId) => Promise<boolean>;
   disconnectAccount: (provider: AccountProviderId) => Promise<void>;
   syncAccount: (provider: AccountProviderId) => Promise<{ playlistCount: number; trackCount: number }>;
   importPlaylistUrl: (url: string) => Promise<Playlist | null>;
+  loadPlaylistTracks: (playlistId: string) => Promise<Track[]>;
+  refreshRecommendations: (force?: boolean) => Promise<void>;
   showToast: (text: string, kind?: 'info' | 'success' | 'error') => void;
 }
 
 const AudioPlayerContext = createContext<AudioContextValue | null>(null);
+
+const HOME_RECS_CACHE_KEY = 'ryotunes_home_recs_cache';
+const HOME_RECS_TTL_MS = 15 * 60 * 1000;
 
 const DEFAULT_ACCOUNTS: AccountsMap = {
   ytmusic: { provider: 'ytmusic', connected: false, accountName: '', connectedAt: 0 },
@@ -172,6 +181,15 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [accounts, setAccounts] = useState<AccountsMap>(DEFAULT_ACCOUNTS);
   const [syncingAccount, setSyncingAccount] = useState<AccountProviderId | null>(null);
   const [importingPlaylistUrl, setImportingPlaylistUrl] = useState<boolean>(false);
+  const [loadingPlaylistId, setLoadingPlaylistId] = useState<string | null>(null);
+  const [loadingRecommendations, setLoadingRecommendations] = useState<boolean>(false);
+  const [homeRecommendations, setHomeRecommendations] = useState<HomeRecommendationSection[]>(() => {
+    const cached = readStoredJson<{ fetchedAt: number; sections: HomeRecommendationSection[] } | null>(
+      HOME_RECS_CACHE_KEY,
+      null
+    );
+    return cached && Array.isArray(cached.sections) ? cached.sections : [];
+  });
 
   const offlineMap = useMemo(() => {
     const m = new Map<string, Track>();
@@ -1610,6 +1628,203 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     []
   );
 
+  const refreshRecommendations = useCallback(
+    async (force = false) => {
+      if (!nativeAndroid) return;
+      if (!force) {
+        const cached = readStoredJson<{ fetchedAt: number; sections: HomeRecommendationSection[] } | null>(
+          HOME_RECS_CACHE_KEY,
+          null
+        );
+        if (
+          cached &&
+          Array.isArray(cached.sections) &&
+          cached.sections.length > 0 &&
+          Date.now() - cached.fetchedAt < HOME_RECS_TTL_MS
+        ) {
+          setHomeRecommendations(cached.sections);
+          return;
+        }
+      }
+      setLoadingRecommendations(true);
+      try {
+        const res = await RyotunesNativeMedia.fetchHomeRecommendations();
+        const rawSections = Array.isArray(res?.sections) ? res.sections : [];
+        const mappedSections: HomeRecommendationSection[] = [];
+        const discoveredPlaylists: Playlist[] = [];
+
+        for (const sec of rawSections) {
+          if (!sec || !Array.isArray(sec.items) || sec.items.length === 0) continue;
+          if (sec.kind === 'playlists') {
+            const pls = (sec.items as Playlist[]).filter((p) => p && p.id && p.title);
+            if (pls.length > 0) {
+              discoveredPlaylists.push(...pls);
+              mappedSections.push({
+                id: sec.id,
+                title: sec.title,
+                subtitle: sec.subtitle,
+                provider: sec.provider,
+                kind: 'playlists',
+                items: pls,
+              });
+            }
+          } else {
+            const trs: Track[] = (sec.items as NativeSyncedTrackItem[])
+              .filter((t) => t && t.id && t.title)
+              .map((t) => ({
+                id: t.id,
+                title: t.title,
+                artist: t.artist || 'Unknown Artist',
+                album: t.album || t.provider?.toUpperCase() || 'Online',
+                duration: Number.isFinite(t.duration) ? t.duration : 0,
+                src: '',
+                artwork: t.artwork,
+                format: t.format || t.provider?.toUpperCase() || 'STREAM',
+                source: t.provider || sec.provider || 'youtube',
+                provider: t.provider || sec.provider || 'youtube',
+                remoteId: t.remoteId,
+                addedAt: Date.now(),
+              }));
+            if (trs.length > 0) {
+              mappedSections.push({
+                id: sec.id,
+                title: sec.title,
+                subtitle: sec.subtitle,
+                provider: sec.provider,
+                kind: 'tracks',
+                items: trs,
+              });
+            }
+          }
+        }
+
+        if (mappedSections.length > 0) {
+          setHomeRecommendations(mappedSections);
+          try {
+            localStorage.setItem(
+              HOME_RECS_CACHE_KEY,
+              JSON.stringify({ fetchedAt: res?.fetchedAt || Date.now(), sections: mappedSections })
+            );
+          } catch {
+            // ignore quota
+          }
+        }
+
+        if (discoveredPlaylists.length > 0) {
+          setPlaylists((prev) => {
+            const existingMap = new Map(prev.map((p) => [p.id, p]));
+            let changed = false;
+            const merged = [...prev];
+            for (const pl of discoveredPlaylists) {
+              if (!existingMap.has(pl.id)) {
+                merged.unshift({
+                  ...pl,
+                  trackIds: Array.isArray(pl.trackIds) ? pl.trackIds : [],
+                  createdAt: pl.createdAt || Date.now(),
+                });
+                changed = true;
+              }
+            }
+            if (changed) {
+              try {
+                localStorage.setItem('ryotunes_playlists', JSON.stringify(merged));
+              } catch {
+                // ignore quota
+              }
+              return merged;
+            }
+            return prev;
+          });
+        }
+      } catch (err) {
+        if (force) {
+          showToast(
+            err instanceof Error ? err.message : 'No se pudieron actualizar las recomendaciones',
+            'error'
+          );
+        }
+      } finally {
+        setLoadingRecommendations(false);
+      }
+    },
+    [nativeAndroid, showToast]
+  );
+
+  useEffect(() => {
+    if (!nativeAndroid) return;
+    const timer = window.setTimeout(() => {
+      void refreshRecommendations(false);
+    }, 900);
+    return () => window.clearTimeout(timer);
+  }, [nativeAndroid, refreshRecommendations]);
+
+  const loadPlaylistTracks = useCallback(
+    async (playlistId: string): Promise<Track[]> => {
+      if (!nativeAndroid) return [];
+      setLoadingPlaylistId(playlistId);
+      try {
+        const res = await RyotunesNativeMedia.fetchRemotePlaylistTracks({ playlistId });
+        const rawTracks = Array.isArray(res?.tracks) ? res.tracks : [];
+        const mappedTracks: Track[] = rawTracks
+          .filter((t) => t && t.id && t.title)
+          .map((t) => ({
+            id: t.id,
+            title: t.title,
+            artist: t.artist || 'Unknown Artist',
+            album: t.album || t.provider?.toUpperCase() || 'Cloud',
+            duration: Number.isFinite(t.duration) ? t.duration : 0,
+            src: '',
+            artwork: t.artwork,
+            format: t.format || t.provider?.toUpperCase() || 'STREAM',
+            source: t.provider || 'youtube',
+            provider: t.provider || 'youtube',
+            remoteId: t.remoteId,
+            addedAt: Date.now(),
+          }));
+
+        if (mappedTracks.length > 0) {
+          const newIds = mappedTracks.map((t) => t.id);
+          setOnlineTracks((prev) => {
+            const map = new Map<string, Track>();
+            for (const t of mappedTracks) map.set(t.id, t);
+            for (const existing of prev) {
+              if (!map.has(existing.id)) map.set(existing.id, existing);
+            }
+            return Array.from(map.values()).slice(0, 600);
+          });
+          setPlaylists((prev) => {
+            const next = prev.map((pl) =>
+              pl.id === playlistId
+                ? {
+                    ...pl,
+                    trackIds: newIds,
+                    artwork: pl.artwork || mappedTracks[0]?.artwork,
+                    subtitle: `${newIds.length} pistas · ${(pl.provider || 'Cloud').toUpperCase()}`,
+                  }
+                : pl
+            );
+            try {
+              localStorage.setItem('ryotunes_playlists', JSON.stringify(next));
+            } catch {
+              // ignore quota
+            }
+            return next;
+          });
+        }
+        return mappedTracks;
+      } catch (err) {
+        showToast(
+          err instanceof Error ? err.message : 'No se pudieron cargar las canciones de la playlist',
+          'error'
+        );
+        return [];
+      } finally {
+        setLoadingPlaylistId((cur) => (cur === playlistId ? null : cur));
+      }
+    },
+    [nativeAndroid, showToast]
+  );
+
   const syncAccount = useCallback(
     async (provider: AccountProviderId): Promise<{ playlistCount: number; trackCount: number }> => {
       if (!nativeAndroid) {
@@ -1624,14 +1839,23 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const likes = Array.isArray(res?.likedIds) ? res.likedIds : [];
         mergeSyncedPlaylists(pls, trs, likes);
         await refreshAccounts();
+        const label =
+          provider === 'ytmusic'
+            ? 'YouTube Music'
+            : provider === 'spotify'
+            ? 'Spotify'
+            : provider === 'soundcloud'
+            ? 'SoundCloud'
+            : 'TIDAL';
         if (pls.length > 0 || trs.length > 0) {
           showToast(
-            `Sincronizado: ${pls.length} playlist${pls.length === 1 ? '' : 's'} · ${trs.length} pistas`,
+            `${label} conectado: ${pls.length} playlist${pls.length === 1 ? '' : 's'} sincronizada${pls.length === 1 ? '' : 's'} (${trs.length} pistas)`,
             'success'
           );
         } else {
-          showToast('Cuenta conectada, pero no se encontraron playlists todavía', 'info');
+          showToast(`${label} conectado, pero tu cuenta no devolvió playlists todavía`, 'info');
         }
+        void refreshRecommendations(true);
         return { playlistCount: pls.length, trackCount: trs.length };
       } catch (err) {
         showToast(
@@ -1643,7 +1867,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setSyncingAccount(null);
       }
     },
-    [mergeSyncedPlaylists, nativeAndroid, refreshAccounts, showToast]
+    [mergeSyncedPlaylists, nativeAndroid, refreshAccounts, refreshRecommendations, showToast]
   );
 
   const connectAccount = useCallback(
@@ -1656,8 +1880,8 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const res = await RyotunesNativeMedia.connectAccount({ provider });
         await refreshAccounts();
         if (res?.connected) {
-          showToast(`Conectado: ${res.accountName || provider.toUpperCase()}`, 'success');
-          void syncAccount(provider);
+          showToast(`Sincronizando playlists de ${res.accountName || provider.toUpperCase()}…`, 'info');
+          await syncAccount(provider);
           return true;
         }
         return false;
@@ -1679,11 +1903,12 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         await RyotunesNativeMedia.disconnectAccount({ provider });
         await refreshAccounts();
         showToast(`Cuenta desconectada (${provider.toUpperCase()})`, 'info');
+        void refreshRecommendations(true);
       } catch {
         showToast('Error al desconectar la cuenta', 'error');
       }
     },
-    [nativeAndroid, refreshAccounts, showToast]
+    [nativeAndroid, refreshAccounts, refreshRecommendations, showToast]
   );
 
   const importPlaylistUrl = useCallback(
@@ -1788,11 +2013,16 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         accounts,
         syncingAccount,
         importingPlaylistUrl,
+        homeRecommendations,
+        loadingRecommendations,
+        loadingPlaylistId,
         refreshAccounts,
         connectAccount,
         disconnectAccount,
         syncAccount,
         importPlaylistUrl,
+        loadPlaylistTracks,
+        refreshRecommendations,
         showToast,
       }}
     >

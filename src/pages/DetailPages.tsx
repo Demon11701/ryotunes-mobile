@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { useAudio } from '../audio/AudioContextProvider';
 import { Artwork } from '../components/Artwork';
 import { TrackRow } from '../components/TrackRow';
@@ -8,6 +8,15 @@ interface DetailPageProps {
   kind: 'playlist' | 'album' | 'artist';
   id: string;
   onBack: () => void;
+}
+
+function isRemotePlaylistId(id: string): boolean {
+  return (
+    id.startsWith('PL:spotify:') ||
+    id.startsWith('PL:ytmusic:') ||
+    id.startsWith('PL:soundcloud:') ||
+    id.startsWith('PL:tidal:')
+  );
 }
 
 /**
@@ -23,8 +32,11 @@ export const DetailPage: React.FC<DetailPageProps> = ({ kind, id, onBack }) => {
     playTrack,
     removeTrackFromPlaylist,
     downloadTracksBatch,
+    loadingPlaylistId,
+    loadPlaylistTracks,
   } = useAudio();
   const trackMap = new Map(tracks.map((t) => [t.id, t]));
+  const attemptedHydrateRef = useRef<Set<string>>(new Set());
 
   let eyebrow = kind.toUpperCase();
   let title = '';
@@ -38,7 +50,7 @@ export const DetailPage: React.FC<DetailPageProps> = ({ kind, id, onBack }) => {
     list = (pl?.trackIds || []).map((tid) => trackMap.get(tid)).filter((t): t is NonNullable<typeof t> => Boolean(t));
     artwork = pl?.artwork || list.find((t) => t.artwork)?.artwork;
     if (pl?.provider) eyebrow = `PLAYLIST // ${pl.provider.toUpperCase()}`;
-    meta = `${list.length} songs · ${pl?.subtitle || 'Device playlist'}`;
+    meta = list.length > 0 ? `${list.length} pistas · ${pl?.subtitle || 'Playlist'}` : pl?.subtitle || 'Playlist';
   } else if (kind === 'album') {
     const alb = albums.find((a) => a.id === id);
     title = alb?.title || 'Album';
@@ -52,6 +64,17 @@ export const DetailPage: React.FC<DetailPageProps> = ({ kind, id, onBack }) => {
     artwork = art?.artwork;
     meta = `${list.length} tracks on device`;
   }
+
+  const remotePl = kind === 'playlist' && isRemotePlaylistId(id);
+  const isLoadingTracks = loadingPlaylistId === id;
+
+  useEffect(() => {
+    if (!remotePl) return;
+    if (list.length > 0 || isLoadingTracks) return;
+    if (attemptedHydrateRef.current.has(id)) return;
+    attemptedHydrateRef.current.add(id);
+    void loadPlaylistTracks(id);
+  }, [remotePl, id, list.length, isLoadingTracks, loadPlaylistTracks]);
 
   return (
     <div className="page-reenter" style={{ display: 'flex', flexDirection: 'column', gap: 18, paddingBottom: 24 }}>
@@ -141,6 +164,28 @@ export const DetailPage: React.FC<DetailPageProps> = ({ kind, id, onBack }) => {
               <Icon name="download" size={14} color="var(--accent)" />
               <span>↓ OFFLINE ALL</span>
             </button>
+            {remotePl && (
+              <button
+                type="button"
+                disabled={isLoadingTracks}
+                onClick={() => void loadPlaylistTracks(id)}
+                className="font-mono-tech ryo-pressable"
+                style={{
+                  height: 36,
+                  padding: '0 12px',
+                  borderRadius: 999,
+                  backgroundColor: 'var(--paper-lift)',
+                  color: 'var(--ink-muted)',
+                  border: '1px solid var(--line)',
+                  fontSize: 12,
+                  fontWeight: 600,
+                  cursor: isLoadingTracks ? 'wait' : 'pointer',
+                  opacity: isLoadingTracks ? 0.6 : 1,
+                }}
+              >
+                {isLoadingTracks ? 'CARGANDO…' : '↻ SYNC'}
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -148,7 +193,11 @@ export const DetailPage: React.FC<DetailPageProps> = ({ kind, id, onBack }) => {
       <div style={{ height: 1, backgroundColor: 'var(--line-soft)' }} />
 
       <div>
-        {list.length === 0 ? (
+        {isLoadingTracks && list.length === 0 ? (
+          <div className="font-mono-tech" style={{ padding: 28, textAlign: 'center', color: 'var(--accent)', fontSize: 12 }}>
+            CARGANDO PISTAS DE LA PLAYLIST…
+          </div>
+        ) : list.length === 0 ? (
           <div style={{ padding: 24, textAlign: 'center', color: 'var(--ink-muted)', fontSize: 13.5 }}>
             No tracks here yet.
           </div>

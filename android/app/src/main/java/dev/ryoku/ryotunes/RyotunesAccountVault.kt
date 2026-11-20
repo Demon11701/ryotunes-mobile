@@ -17,7 +17,10 @@ object RyotunesAccountVault {
         val cookieHeader: String,
         val primaryToken: String,
         val accountName: String,
-        val connectedAt: Long
+        val connectedAt: Long,
+        val accessToken: String = "",
+        val clientToken: String = "",
+        val tokenCapturedAt: Long = 0L
     )
 
     fun normalizeProvider(raw: String): String {
@@ -35,16 +38,47 @@ object RyotunesAccountVault {
         rawProvider: String,
         cookieHeader: String,
         primaryToken: String,
-        accountName: String
+        accountName: String,
+        accessToken: String = "",
+        clientToken: String = ""
     ) {
         val p = normalizeProvider(rawProvider)
         val cleanName = accountName.trim().ifBlank { defaultAccountLabel(p) }
+        val now = System.currentTimeMillis()
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().apply {
             putBoolean("${p}_connected", true)
             putString("${p}_cookie", cookieHeader)
             putString("${p}_token", primaryToken)
             putString("${p}_name", cleanName)
-            putLong("${p}_at", System.currentTimeMillis())
+            putLong("${p}_at", now)
+            if (accessToken.isNotBlank()) {
+                putString("${p}_access_token", accessToken.trim())
+                putLong("${p}_token_at", now)
+            }
+            if (clientToken.isNotBlank()) {
+                putString("${p}_client_token", clientToken.trim())
+            }
+            apply()
+        }
+    }
+
+    fun updateTokens(
+        context: Context,
+        rawProvider: String,
+        accessToken: String,
+        clientToken: String = ""
+    ) {
+        val p = normalizeProvider(rawProvider)
+        if (accessToken.isBlank() && clientToken.isBlank()) return
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().apply {
+            if (accessToken.isNotBlank()) {
+                putString("${p}_access_token", accessToken.trim())
+                putLong("${p}_token_at", System.currentTimeMillis())
+            }
+            if (clientToken.isNotBlank()) {
+                putString("${p}_client_token", clientToken.trim())
+            }
             apply()
         }
     }
@@ -63,10 +97,13 @@ object RyotunesAccountVault {
         if (!prefs.getBoolean("${p}_connected", false)) return null
         val cookie = prefs.getString("${p}_cookie", "") ?: ""
         val token = prefs.getString("${p}_token", "") ?: ""
-        if (cookie.isBlank() && token.isBlank()) return null
+        val accessToken = prefs.getString("${p}_access_token", "") ?: ""
+        val clientToken = prefs.getString("${p}_client_token", "") ?: ""
+        val tokenAt = prefs.getLong("${p}_token_at", 0L)
+        if (cookie.isBlank() && token.isBlank() && accessToken.isBlank()) return null
         val name = prefs.getString("${p}_name", defaultAccountLabel(p)) ?: defaultAccountLabel(p)
         val at = prefs.getLong("${p}_at", 0L)
-        return AccountSession(p, cookie, token, name, at)
+        return AccountSession(p, cookie, token, name, at, accessToken, clientToken, tokenAt)
     }
 
     fun disconnect(context: Context, rawProvider: String) {
@@ -75,6 +112,9 @@ object RyotunesAccountVault {
             remove("${p}_connected")
             remove("${p}_cookie")
             remove("${p}_token")
+            remove("${p}_access_token")
+            remove("${p}_client_token")
+            remove("${p}_token_at")
             remove("${p}_name")
             remove("${p}_at")
             apply()

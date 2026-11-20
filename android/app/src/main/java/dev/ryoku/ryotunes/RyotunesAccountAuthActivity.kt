@@ -3,16 +3,21 @@ package dev.ryoku.ryotunes
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -23,11 +28,13 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.res.ResourcesCompat
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Native WebView login screen for YouTube Music, Spotify, SoundCloud, and TIDAL.
- * Detects valid provider session cookies/tokens automatically without requiring
- * manual cookie pasting or developer API keys.
+ * For Spotify, waits until open.spotify.com loads and captures the real Bearer accessToken
+ * and client-token directly from WebView API traffic and session hooks (bypassing 2025 TOTP limits).
  */
 class RyotunesAccountAuthActivity : AppCompatActivity() {
 
@@ -37,16 +44,136 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
         const val RESULT_PROVIDER = "provider"
         const val RESULT_ACCOUNT_NAME = "accountName"
 
-        private const val CLEAN_CHROME_UA =
+        internal const val CLEAN_CHROME_UA =
             "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Mobile Safari/537.36"
+
+        internal val SPOTIFY_TOKEN_HOOK_JS: String = """
+            (function() {
+              try {
+                function report(auth, clientTok) {
+                  if (!window.RyotunesTokenBridge) return;
+                  var tok = '';
+                  if (typeof auth === 'string') {
+                    var m = auth.match(/Bearer\s+([^\s]+)/i);
+                    tok = m ? m[1] : (auth.length > 30 ? auth : '');
+                  }
+                  var ct = (typeof clientTok === 'string') ? clientTok : '';
+                  if (tok || ct) {
+                    try { window.RyotunesTokenBridge.onToken(tok, ct); } catch (e) {}
+                  }
+                }
+                function readSessionScript() {
+                  var ids = ['session', 'config', 'initialState'];
+                  for (var i = 0; i < ids.length; i++) {
+                    var el = document.getElementById(ids[i]);
+                    if (!el || !el.textContent) continue;
+                    try {
+                      var obj = JSON.parse(el.textContent);
+                      if (obj && typeof obj.accessToken === 'string' && obj.accessToken.length > 20 && obj.isAnonymous !== true) {
+                        report(obj.accessToken, '');
+                      }
+                    } catch (e) {
+                      var m = el.textContent.match(/"accessToken"\s*:\s*"([^"]{24,})"/);
+                      if (m && m[1] && el.textContent.indexOf('"isAnonymous":true') < 0) {
+                        report(m[1], '');
+                      }
+                    }
+                  }
+                }
+                readSessionScript();
+                if (!window.__ryoSpotifyHooked) {
+                  window.__ryoSpotifyHooked = true;
+                  var origFetch = window.fetch;
+                  if (typeof origFetch === 'function') {
+                    window.fetch = function(input, init) {
+                      try {
+                        var url = (typeof input === 'string') ? input : (input && input.url ? input.url : '');
+                        var hdrs = (init && init.headers) || (input && input.headers) || null;
+                        if (hdrs && url && (url.indexOf('spotify.com') >= 0 || url.indexOf('spotifycdn') < 0)) {
+                          var auth = '', ct = '';
+                          if (typeof hdrs.get === 'function') {
+                            auth = hdrs.get('authorization') || hdrs.get('Authorization') || '';
+                            ct = hdrs.get('client-token') || hdrs.get('Client-Token') || '';
+                          } else if (Array.isArray(hdrs)) {
+                            for (var j = 0; j < hdrs.length; j++) {
+                              var k = String(hdrs[j][0] || '').toLowerCase();
+                              if (k === 'authorization') auth = String(hdrs[j][1] || '');
+                              if (k === 'client-token') ct = String(hdrs[j][1] || '');
+                            }
+                          } else if (typeof hdrs === 'object') {
+                            var keys = Object.keys(hdrs);
+                            for (var n = 0; n < keys.length; n++) {
+                              var kl = keys[n].toLowerCase();
+                              if (kl === 'authorization') auth = String(hdrs[keys[n]] || '');
+                              if (kl === 'client-token') ct = String(hdrs[keys[n]] || '');
+                            }
+                          }
+                          if (auth || ct) report(auth, ct);
+                        }
+                      } catch (e) {}
+                      return origFetch.apply(this, arguments);
+                    };
+                  }
+                  var origSetHeader = XMLHttpRequest.prototype.setRequestHeader;
+                  if (typeof origSetHeader === 'function') {
+                    XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
+                      try {
+                        var nl = String(name || '').toLowerCase();
+                        if (nl === 'authorization') report(String(value || ''), '');
+                        if (nl === 'client-token') report('', String(value || ''));
+                      } catch (e) {}
+                      return origSetHeader.apply(this, arguments);
+                    };
+                  }
+                }
+              } catch (e) {}
+            })();
+        """.trimIndent()
     }
 
     private lateinit var provider: String
     private lateinit var webView: WebView
     private lateinit var progressBar: ProgressBar
+    private lateinit var titleTv: TextView
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val capturedAccessToken = AtomicReference("")
+    private val capturedClientToken = AtomicReference("")
+    private val finishScheduled = AtomicBoolean(false)
     private var completed = false
 
-    @SuppressLint("SetJavaScriptEnabled")
+    private inner class TokenCaptureBridge {
+        @JavascriptInterface
+        fun onToken(accessToken: String?, clientToken: String?) {
+            val tok = accessToken?.trim().orEmpty()
+            val ct = clientToken?.trim().orEmpty()
+            var updated = false
+            if (tok.length > 20) {
+                capturedAccessToken.set(tok)
+                updated = true
+            }
+            if (ct.length > 10) {
+                capturedClientToken.set(ct)
+                updated = true
+            }
+            if (updated && capturedAccessToken.get().isNotBlank()) {
+                scheduleSpotifyCheck()
+            }
+        }
+    }
+
+    private fun scheduleSpotifyCheck() {
+        if (completed || provider != "spotify") return
+        if (finishScheduled.compareAndSet(false, true)) {
+            mainHandler.postDelayed({
+                finishScheduled.set(false)
+                if (!completed) {
+                    checkSessionAndFinish(manualTap = false)
+                }
+            }, 400L)
+        }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled", "AddJavascriptInterface")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -85,7 +212,7 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
             else -> provider.uppercase()
         }
 
-        val titleTv = TextView(this).apply {
+        titleTv = TextView(this).apply {
             text = "● CONECTAR // $providerTitle"
             setTextColor(Color.parseColor("#F3EEFF"))
             textSize = 13f
@@ -159,12 +286,14 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
             settings.apply {
                 javaScriptEnabled = true
                 domStorageEnabled = true
+                @Suppress("DEPRECATION")
                 databaseEnabled = true
                 useWideViewPort = true
                 loadWithOverviewMode = true
                 mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
                 userAgentString = CLEAN_CHROME_UA
             }
+            addJavascriptInterface(TokenCaptureBridge(), "RyotunesTokenBridge")
         }
 
         val cm = CookieManager.getInstance()
@@ -181,13 +310,79 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                 val scheme = request?.url?.scheme?.lowercase() ?: return false
-                // Keep http/https navigation inside our WebView rather than bouncing to native apps
+                // Keep http/https inside WebView instead of bouncing out to native Spotify/YT apps
                 return scheme != "http" && scheme != "https"
+            }
+
+            override fun shouldInterceptRequest(
+                view: WebView?,
+                request: WebResourceRequest?
+            ): WebResourceResponse? {
+                if (!completed && request != null) {
+                    val host = request.url?.host?.lowercase().orEmpty()
+                    val hdrs = request.requestHeaders
+                    if (hdrs != null && hdrs.isNotEmpty()) {
+                        if (provider == "spotify" &&
+                            (host.contains("api.spotify.com") ||
+                                host.contains("api-partner.spotify.com") ||
+                                host.contains("spclient.wg.spotify.com"))
+                        ) {
+                            for ((k, v) in hdrs) {
+                                val kl = k.lowercase()
+                                if (kl == "authorization" && v.startsWith("Bearer ", ignoreCase = true)) {
+                                    val tok = v.substring(7).trim()
+                                    if (tok.length > 20) capturedAccessToken.set(tok)
+                                } else if (kl == "client-token" && v.length > 10) {
+                                    capturedClientToken.set(v.trim())
+                                }
+                            }
+                            if (capturedAccessToken.get().isNotBlank()) {
+                                scheduleSpotifyCheck()
+                            }
+                        } else if (provider == "tidal" &&
+                            (host.contains("api.tidal.com") || host.contains("listen.tidal.com"))
+                        ) {
+                            for ((k, v) in hdrs) {
+                                if (k.equals("authorization", ignoreCase = true) &&
+                                    v.startsWith("Bearer ", ignoreCase = true)
+                                ) {
+                                    val tok = v.substring(7).trim()
+                                    if (tok.length > 20) {
+                                        capturedAccessToken.set(tok)
+                                        mainHandler.post { checkSessionAndFinish(manualTap = false) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return super.shouldInterceptRequest(view, request)
+            }
+
+            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                if (!completed && provider == "spotify" && url != null &&
+                    url.contains("open.spotify.com", ignoreCase = true)
+                ) {
+                    titleTv.text = "● CAPTURANDO SESIÓN // SPOTIFY…"
+                    view?.evaluateJavascript(SPOTIFY_TOKEN_HOOK_JS, null)
+                }
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 if (!completed && url != null) {
+                    if (provider == "spotify" && url.contains("open.spotify.com", ignoreCase = true)) {
+                        titleTv.text = "● CAPTURANDO SESIÓN // SPOTIFY…"
+                        view?.evaluateJavascript(SPOTIFY_TOKEN_HOOK_JS, null)
+                        // Re-check once SPA hydrates API calls
+                        mainHandler.postDelayed({
+                            if (!completed) {
+                                view?.evaluateJavascript(SPOTIFY_TOKEN_HOOK_JS, null)
+                                checkSessionAndFinish(manualTap = false, currentUrl = webView.url ?: url)
+                            }
+                        }, 1500L)
+                    }
                     checkSessionAndFinish(manualTap = false, currentUrl = url)
                 }
             }
@@ -195,6 +390,9 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
                 super.doUpdateVisitedHistory(view, url, isReload)
                 if (!completed && url != null) {
+                    if (provider == "spotify" && url.contains("open.spotify.com", ignoreCase = true)) {
+                        view?.evaluateJavascript(SPOTIFY_TOKEN_HOOK_JS, null)
+                    }
                     checkSessionAndFinish(manualTap = false, currentUrl = url)
                 }
             }
@@ -213,6 +411,17 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
         webView.loadUrl(loginUrl)
     }
 
+    private fun readSpotifyCookies(cm: CookieManager): Pair<String, String> {
+        val c1 = cm.getCookie("https://open.spotify.com").orEmpty()
+        val c2 = cm.getCookie("https://spotify.com").orEmpty()
+        val mergedMap = LinkedHashMap<String, String>()
+        mergedMap.putAll(RyotunesAccountVault.parseCookieMap(c2))
+        mergedMap.putAll(RyotunesAccountVault.parseCookieMap(c1))
+        val spDc = mergedMap["sp_dc"].orEmpty()
+        val header = mergedMap.entries.joinToString("; ") { "${it.key}=${it.value}" }
+        return header to spDc
+    }
+
     private fun checkSessionAndFinish(manualTap: Boolean, currentUrl: String = webView.url ?: "") {
         if (completed) return
         val cm = CookieManager.getInstance()
@@ -220,8 +429,13 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
 
         when (provider) {
             "ytmusic" -> {
-                val cookies = cm.getCookie("https://music.youtube.com") ?: ""
-                val map = RyotunesAccountVault.parseCookieMap(cookies)
+                val c1 = cm.getCookie("https://music.youtube.com").orEmpty()
+                val c2 = cm.getCookie("https://youtube.com").orEmpty()
+                val map = LinkedHashMap<String, String>().apply {
+                    putAll(RyotunesAccountVault.parseCookieMap(c2))
+                    putAll(RyotunesAccountVault.parseCookieMap(c1))
+                }
+                val cookies = map.entries.joinToString("; ") { "${it.key}=${it.value}" }
                 val sapisid = map["SAPISID"] ?: map["__Secure-3PAPISID"] ?: ""
                 val onMusicDomain = currentUrl.contains("music.youtube.com", ignoreCase = true)
                 if (sapisid.isNotBlank() && (onMusicDomain || manualTap)) {
@@ -231,14 +445,34 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
                 }
             }
             "spotify" -> {
-                val cookies = cm.getCookie("https://open.spotify.com") ?: ""
-                val map = RyotunesAccountVault.parseCookieMap(cookies)
-                val spDc = map["sp_dc"] ?: ""
-                val onSpotifyWeb = currentUrl.contains("open.spotify.com", ignoreCase = true)
-                if (spDc.isNotBlank() && (onSpotifyWeb || manualTap)) {
-                    completeWithSession(cookies, spDc, "Spotify")
-                } else if (manualTap) {
-                    Toast.makeText(this, "Completa el acceso a Spotify antes de pulsar LISTO", Toast.LENGTH_SHORT).show()
+                val (cookies, spDc) = readSpotifyCookies(cm)
+                val onAccounts = currentUrl.contains("accounts.spotify.com", ignoreCase = true)
+                val onOpenSpotify = currentUrl.contains("open.spotify.com", ignoreCase = true)
+                val accessTok = capturedAccessToken.get()
+                val clientTok = capturedClientToken.get()
+
+                // Never auto-close while still on accounts.spotify.com — wait for open.spotify.com + real Bearer token
+                if (spDc.isNotBlank() && accessTok.isNotBlank() && !onAccounts && (onOpenSpotify || manualTap)) {
+                    completeWithSession(cookies, spDc, "Spotify", accessTok, clientTok)
+                    return
+                }
+
+                if (manualTap) {
+                    if (spDc.isNotBlank() && !onOpenSpotify) {
+                        Toast.makeText(this, "Cargando Spotify Web para capturar tu sesión…", Toast.LENGTH_SHORT).show()
+                        webView.loadUrl("https://open.spotify.com/")
+                    } else if (spDc.isNotBlank() && onOpenSpotify) {
+                        webView.evaluateJavascript(SPOTIFY_TOKEN_HOOK_JS, null)
+                        mainHandler.postDelayed({
+                            if (completed) return@postDelayed
+                            val (latestCookies, latestSpDc) = readSpotifyCookies(CookieManager.getInstance())
+                            val tokNow = capturedAccessToken.get()
+                            val ctNow = capturedClientToken.get()
+                            completeWithSession(latestCookies, latestSpDc.ifBlank { spDc }, "Spotify", tokNow, ctNow)
+                        }, 650L)
+                    } else {
+                        Toast.makeText(this, "Completa el acceso a Spotify antes de pulsar LISTO", Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
             "soundcloud" -> {
@@ -254,12 +488,16 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
             "tidal" -> {
                 val cookies = cm.getCookie("https://listen.tidal.com") ?: ""
                 val map = RyotunesAccountVault.parseCookieMap(cookies)
+                val capturedBearer = capturedAccessToken.get()
+                if (capturedBearer.isNotBlank()) {
+                    completeWithSession(cookies, capturedBearer, "TIDAL", capturedBearer, "")
+                    return
+                }
                 val sessionId = map["sessionId"] ?: map["TIDAL_SESSION_ID"] ?: ""
                 if (sessionId.isNotBlank()) {
                     completeWithSession(cookies, sessionId, "TIDAL")
                     return
                 }
-                // TIDAL web player often keeps OAuth tokens in localStorage
                 val js = """
                     (function() {
                       try {
@@ -280,7 +518,7 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
                         ?: Regex("\"sessionId\"\\s*:\\s*\"([^\"]+)\"").find(cleaned)?.groupValues?.getOrNull(1)
                         ?: ""
                     if (tokenMatch.isNotBlank()) {
-                        completeWithSession(cookies, tokenMatch, "TIDAL")
+                        completeWithSession(cookies, tokenMatch, "TIDAL", tokenMatch, "")
                     } else if (manualTap) {
                         if (cookies.isNotBlank() && currentUrl.contains("listen.tidal.com", ignoreCase = true)) {
                             completeWithSession(cookies, "web_session", "TIDAL")
@@ -293,10 +531,16 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
         }
     }
 
-    private fun completeWithSession(cookies: String, token: String, label: String) {
+    private fun completeWithSession(
+        cookies: String,
+        token: String,
+        label: String,
+        accessToken: String = "",
+        clientToken: String = ""
+    ) {
         if (completed) return
         completed = true
-        RyotunesAccountVault.saveSession(this, provider, cookies, token, label)
+        RyotunesAccountVault.saveSession(this, provider, cookies, token, label, accessToken, clientToken)
         val data = Intent().apply {
             putExtra(RESULT_CONNECTED, true)
             putExtra(RESULT_PROVIDER, provider)
@@ -317,6 +561,7 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        mainHandler.removeCallbacksAndMessages(null)
         if (::webView.isInitialized) {
             webView.stopLoading()
             webView.destroy()

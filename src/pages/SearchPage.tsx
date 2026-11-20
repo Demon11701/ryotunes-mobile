@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useAudio } from '../audio/AudioContextProvider';
 import { searchOnlineTracks } from '../audio/providerService';
-import { OnlineProviderFilter, Track } from '../audio/types';
+import { LibraryPage, LibraryTab, OnlineProviderFilter, Track } from '../audio/types';
 import { Artwork } from '../components/Artwork';
 import { OfflineButton } from '../components/OfflineButton';
 import { ProviderBadge } from '../components/ProviderBadge';
+import { RecommendationsFeed } from '../components/RecommendationsFeed';
 import { TrackRow } from '../components/TrackRow';
 import { Icon } from '../icons/Icon';
 import { PROVIDER_COLORS } from '../theme/skins';
@@ -12,6 +13,7 @@ import { useTheme } from '../theme/ThemeContext';
 
 interface SearchPageProps {
   initialQuery?: string;
+  onNavigate?: (page: LibraryPage, param?: string, tab?: LibraryTab) => void;
 }
 
 const PROVIDERS: { key: OnlineProviderFilter; label: string; icon: string; color: string }[] = [
@@ -23,7 +25,7 @@ const PROVIDERS: { key: OnlineProviderFilter; label: string; icon: string; color
   { key: 'offline', label: 'Offline / Local', icon: 'folder', color: 'var(--ink)' },
 ];
 
-export const SearchPage: React.FC<SearchPageProps> = ({ initialQuery = '' }) => {
+export const SearchPage: React.FC<SearchPageProps> = ({ initialQuery = '', onNavigate }) => {
   const { tracks, currentTrack, playTrack, showToast } = useAudio();
   const { decor } = useTheme();
   const [query, setQuery] = useState(initialQuery);
@@ -126,7 +128,6 @@ export const SearchPage: React.FC<SearchPageProps> = ({ initialQuery = '' }) => 
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search YouTube Music, Spotify, SoundCloud, TIDAL…"
-          autoFocus
           style={{
             flex: 1,
             minWidth: 0,
@@ -265,21 +266,34 @@ export const SearchPage: React.FC<SearchPageProps> = ({ initialQuery = '' }) => 
         </div>
       )}
 
-      <div className="font-mono-tech" style={{ fontSize: 10.5, color: 'var(--ink-faint)', letterSpacing: 1.4 }}>
-        {displayedResults.length} RESULT{displayedResults.length === 1 ? '' : 'S'}
-      </div>
+      {/* Live Recommendations & Connected Playlists when search bar is empty */}
+      {!query.trim() && provider !== 'offline' && (
+        <RecommendationsFeed
+          providerFilter={provider}
+          onNavigate={(page, param, tab) => onNavigate?.(page, param, tab)}
+        />
+      )}
 
-      <div>
-        {displayedResults.map((t, i) => (
-          <TrackRow
-            key={t.id}
-            track={t}
-            index={i}
-            active={currentTrack?.id === t.id}
-            onPlay={() => playTrack(t, displayedResults)}
-          />
-        ))}
-      </div>
+      {/* Search Results / Offline Filter */}
+      {(query.trim().length > 0 || provider === 'offline') && (
+        <>
+          <div className="font-mono-tech" style={{ fontSize: 10.5, color: 'var(--ink-faint)', letterSpacing: 1.4 }}>
+            {displayedResults.length} RESULT{displayedResults.length === 1 ? '' : 'S'}
+          </div>
+
+          <div>
+            {displayedResults.map((t, i) => (
+              <TrackRow
+                key={t.id}
+                track={t}
+                index={i}
+                active={currentTrack?.id === t.id}
+                onPlay={() => playTrack(t, displayedResults)}
+              />
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 };

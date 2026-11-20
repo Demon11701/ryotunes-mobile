@@ -126,6 +126,26 @@ export interface NativeImportPlaylistResult {
   tracks: NativeSyncedTrackItem[];
 }
 
+export interface NativeRemotePlaylistTracksResult {
+  playlistId: string;
+  tracks: NativeSyncedTrackItem[];
+  trackIds: string[];
+}
+
+export interface NativeHomeRecommendationSectionRaw {
+  id: string;
+  title: string;
+  subtitle: string;
+  provider: ProviderId;
+  kind: 'tracks' | 'playlists';
+  items: Array<NativeSyncedTrackItem | Playlist>;
+}
+
+export interface NativeHomeRecommendationsResult {
+  fetchedAt: number;
+  sections: NativeHomeRecommendationSectionRaw[];
+}
+
 export interface NativeUpdateProgressEvent {
   progress: number;
   version?: string;
@@ -177,6 +197,11 @@ export interface RyotunesNativeMediaPluginInterface {
   getConnectedAccounts(): Promise<AccountsMap>;
   syncAccountPlaylists(options: { provider: AccountProviderId }): Promise<NativeAccountSyncResult>;
   importPlaylistByUrl(options: { url: string }): Promise<NativeImportPlaylistResult>;
+  fetchRemotePlaylistTracks(options: {
+    playlistId: string;
+    provider?: string;
+  }): Promise<NativeRemotePlaylistTracksResult>;
+  fetchHomeRecommendations(): Promise<NativeHomeRecommendationsResult>;
   getAppVersionInfo(): Promise<AppVersionInfo>;
   checkGithubUpdate(): Promise<GithubUpdateInfo>;
   downloadAndInstallUpdate(options: {

@@ -681,6 +681,36 @@ class RyotunesNativeMediaPlugin : Plugin(), RyotunesAudioService.ServiceListener
         }
     }
 
+    @PluginMethod
+    fun fetchRemotePlaylistTracks(call: PluginCall) {
+        val playlistId = call.getString("playlistId") ?: ""
+        val provider = call.getString("provider") ?: ""
+        if (playlistId.isBlank()) {
+            call.reject("Missing playlistId")
+            return
+        }
+        ioExecutor.execute {
+            try {
+                val res = RyotunesAccountSync.fetchRemotePlaylistTracks(context, playlistId, provider)
+                call.resolve(res)
+            } catch (e: Throwable) {
+                call.reject(e.localizedMessage ?: "No se pudieron cargar las pistas de la playlist")
+            }
+        }
+    }
+
+    @PluginMethod
+    fun fetchHomeRecommendations(call: PluginCall) {
+        ioExecutor.execute {
+            try {
+                val res = RyotunesAccountSync.fetchHomeRecommendations(context)
+                call.resolve(res)
+            } catch (e: Throwable) {
+                call.reject(e.localizedMessage ?: "No se pudieron cargar las recomendaciones")
+            }
+        }
+    }
+
     // ── GitHub Releases OTA Auto-Updater ──────────────────────────────────────
 
     @PluginMethod

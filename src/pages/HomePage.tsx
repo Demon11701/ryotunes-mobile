@@ -3,6 +3,7 @@ import { useAudio } from '../audio/AudioContextProvider';
 import { LibraryPage, LibraryTab } from '../audio/types';
 import { Artwork } from '../components/Artwork';
 import { MediaCard } from '../components/MediaCard';
+import { RecommendationsFeed } from '../components/RecommendationsFeed';
 import { TrackRow } from '../components/TrackRow';
 import { Icon } from '../icons/Icon';
 import { useTheme } from '../theme/ThemeContext';
@@ -191,6 +192,9 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate, onOpenBento }) =
           })}
         </div>
       </div>
+
+      {/* // Live Recommendations & Connected Cloud Playlists */}
+      {chip === 'all' && <RecommendationsFeed onNavigate={onNavigate} />}
 
       {/* // Shortcuts */}
       <div>
