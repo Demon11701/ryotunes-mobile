@@ -2,6 +2,7 @@ package dev.ryoku.ryotunes
 
 import android.content.Context
 import android.webkit.CookieManager
+import android.webkit.WebStorage
 import com.getcapacitor.JSObject
 
 /**
@@ -155,21 +156,65 @@ object RyotunesAccountVault {
             val cm = CookieManager.getInstance()
             val urls = when (provider) {
                 "ytmusic" -> listOf("https://music.youtube.com", "https://youtube.com", "https://accounts.google.com")
-                "spotify" -> listOf("https://open.spotify.com", "https://accounts.spotify.com", "https://spotify.com")
+                "spotify" -> listOf(
+                    "https://open.spotify.com",
+                    "https://accounts.spotify.com",
+                    "https://spotify.com",
+                    "https://.spotify.com"
+                )
                 "soundcloud" -> listOf("https://soundcloud.com", "https://secure.soundcloud.com")
                 "tidal" -> listOf("https://listen.tidal.com", "https://login.tidal.com", "https://tidal.com")
                 else -> emptyList()
             }
+            val rootDomain = when (provider) {
+                "ytmusic" -> ".youtube.com"
+                "spotify" -> ".spotify.com"
+                "soundcloud" -> ".soundcloud.com"
+                "tidal" -> ".tidal.com"
+                else -> ""
+            }
+            val expSuffix = "Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/"
             for (u in urls) {
                 val raw = cm.getCookie(u) ?: continue
                 raw.split(';').forEach { pair ->
                     val name = pair.substringBefore('=').trim()
                     if (name.isNotEmpty()) {
-                        cm.setCookie(u, "$name=; Max-Age=0; path=/")
+                        cm.setCookie(u, "$name=; $expSuffix")
+                        cm.setCookie(u, "$name=; $expSuffix; Secure")
+                        if (rootDomain.isNotEmpty()) {
+                            cm.setCookie(u, "$name=; Domain=$rootDomain; $expSuffix")
+                            cm.setCookie(u, "$name=; Domain=$rootDomain; $expSuffix; Secure")
+                        }
+                    }
+                }
+            }
+            if (provider == "spotify") {
+                val spotifyAuthCookies = listOf(
+                    "sp_dc",
+                    "sp_t",
+                    "sp_key",
+                    "sp_landing",
+                    "sp_phash",
+                    "__Host-sp_csrf_sid",
+                    "sp_sso_csrf_token"
+                )
+                for (name in spotifyAuthCookies) {
+                    for (u in urls) {
+                        cm.setCookie(u, "$name=; $expSuffix")
+                        cm.setCookie(u, "$name=; $expSuffix; Secure")
+                        cm.setCookie(u, "$name=; Domain=.spotify.com; $expSuffix; Secure")
                     }
                 }
             }
             cm.flush()
+
+            // Clear WebStorage (localStorage / IndexedDB) for provider origins
+            runCatching {
+                val ws = WebStorage.getInstance()
+                urls.filter { !it.contains("://.") }.forEach { origin ->
+                    ws.deleteOrigin(origin)
+                }
+            }
         } catch (_: Throwable) {
             // Safe no-op if WebView provider is uninitialized
         }

@@ -15,6 +15,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
+import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -28,13 +29,18 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.res.ResourcesCompat
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Native WebView login screen for YouTube Music, Spotify, SoundCloud, and TIDAL.
- * For Spotify, waits until open.spotify.com loads and captures the real Bearer accessToken
- * and client-token directly from WebView API traffic and session hooks (bypassing 2025 TOTP limits).
+ * For Spotify: grants Widevine DRM (RESOURCE_PROTECTED_MEDIA_ID), uses Desktop Chrome UA
+ * so open.spotify.com boots the real Web Player, captures Bearer + client-token only after
+ * sp_dc is present, and verifies HTTP 200 OK against /v1/me before closing.
  */
 class RyotunesAccountAuthActivity : AppCompatActivity() {
 
@@ -46,6 +52,9 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
 
         internal const val CLEAN_CHROME_UA =
             "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Mobile Safari/537.36"
+
+        internal const val SPOTIFY_DESKTOP_CHROME_UA =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
         internal val SPOTIFY_TOKEN_HOOK_JS: String = """
             (function() {
@@ -67,14 +76,18 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
                   for (var i = 0; i < ids.length; i++) {
                     var el = document.getElementById(ids[i]);
                     if (!el || !el.textContent) continue;
+                    var raw = el.textContent;
+                    if (raw.indexOf('"isAnonymous":true') >= 0 || raw.indexOf('"isAnonymous": true') >= 0) {
+                      continue;
+                    }
                     try {
-                      var obj = JSON.parse(el.textContent);
-                      if (obj && typeof obj.accessToken === 'string' && obj.accessToken.length > 20 && obj.isAnonymous !== true) {
+                      var obj = JSON.parse(raw);
+                      if (obj && obj.isAnonymous === false && typeof obj.accessToken === 'string' && obj.accessToken.length > 24) {
                         report(obj.accessToken, '');
                       }
                     } catch (e) {
-                      var m = el.textContent.match(/"accessToken"\s*:\s*"([^"]{24,})"/);
-                      if (m && m[1] && el.textContent.indexOf('"isAnonymous":true') < 0) {
+                      var m = raw.match(/"accessToken"\s*:\s*"([^"]{24,})"/);
+                      if (m && m[1] && raw.indexOf('"isAnonymous":false') >= 0) {
                         report(m[1], '');
                       }
                     }
@@ -89,7 +102,7 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
                       try {
                         var url = (typeof input === 'string') ? input : (input && input.url ? input.url : '');
                         var hdrs = (init && init.headers) || (input && input.headers) || null;
-                        if (hdrs && url && (url.indexOf('spotify.com') >= 0 || url.indexOf('spotifycdn') < 0)) {
+                        if (hdrs && url && url.indexOf('spotify.com') >= 0 && url.indexOf('spotifycdn') < 0) {
                           var auth = '', ct = '';
                           if (typeof hdrs.get === 'function') {
                             auth = hdrs.get('authorization') || hdrs.get('Authorization') || '';
@@ -136,18 +149,28 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
     private lateinit var progressBar: ProgressBar
     private lateinit var titleTv: TextView
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val verifyExecutor = Executors.newSingleThreadExecutor()
     private val capturedAccessToken = AtomicReference("")
     private val capturedClientToken = AtomicReference("")
     private val finishScheduled = AtomicBoolean(false)
+    private val verifyingSpotify = AtomicBoolean(false)
     private var completed = false
 
     private inner class TokenCaptureBridge {
         @JavascriptInterface
         fun onToken(accessToken: String?, clientToken: String?) {
+            if (completed) return
             val tok = accessToken?.trim().orEmpty()
             val ct = clientToken?.trim().orEmpty()
+
+            if (provider == "spotify") {
+                // Never accept a Spotify token before sp_dc cookie exists (avoids anonymous visitor tokens)
+                val (_, spDc) = readSpotifyCookies(CookieManager.getInstance())
+                if (spDc.isBlank()) return
+            }
+
             var updated = false
-            if (tok.length > 20) {
+            if (tok.length > 24) {
                 capturedAccessToken.set(tok)
                 updated = true
             }
@@ -169,7 +192,7 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
                 if (!completed) {
                     checkSessionAndFinish(manualTap = false)
                 }
-            }, 400L)
+            }, 500L)
         }
     }
 
@@ -288,10 +311,11 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
                 domStorageEnabled = true
                 @Suppress("DEPRECATION")
                 databaseEnabled = true
+                mediaPlaybackRequiresUserGesture = false
                 useWideViewPort = true
                 loadWithOverviewMode = true
                 mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                userAgentString = CLEAN_CHROME_UA
+                userAgentString = if (provider == "spotify") SPOTIFY_DESKTOP_CHROME_UA else CLEAN_CHROME_UA
             }
             addJavascriptInterface(TokenCaptureBridge(), "RyotunesTokenBridge")
         }
@@ -304,6 +328,13 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
                 progressBar.progress = newProgress
                 progressBar.visibility = if (newProgress >= 100) View.GONE else View.VISIBLE
+            }
+
+            override fun onPermissionRequest(request: PermissionRequest) {
+                val allowed = request.resources.filter {
+                    it == PermissionRequest.RESOURCE_PROTECTED_MEDIA_ID
+                }.toTypedArray()
+                if (allowed.isNotEmpty()) request.grant(allowed) else request.deny()
             }
         }
 
@@ -327,17 +358,20 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
                                 host.contains("api-partner.spotify.com") ||
                                 host.contains("spclient.wg.spotify.com"))
                         ) {
-                            for ((k, v) in hdrs) {
-                                val kl = k.lowercase()
-                                if (kl == "authorization" && v.startsWith("Bearer ", ignoreCase = true)) {
-                                    val tok = v.substring(7).trim()
-                                    if (tok.length > 20) capturedAccessToken.set(tok)
-                                } else if (kl == "client-token" && v.length > 10) {
-                                    capturedClientToken.set(v.trim())
+                            val (_, spDc) = readSpotifyCookies(CookieManager.getInstance())
+                            if (spDc.isNotBlank()) {
+                                for ((k, v) in hdrs) {
+                                    val kl = k.lowercase()
+                                    if (kl == "authorization" && v.startsWith("Bearer ", ignoreCase = true)) {
+                                        val tok = v.substring(7).trim()
+                                        if (tok.length > 24) capturedAccessToken.set(tok)
+                                    } else if (kl == "client-token" && v.length > 10) {
+                                        capturedClientToken.set(v.trim())
+                                    }
                                 }
-                            }
-                            if (capturedAccessToken.get().isNotBlank()) {
-                                scheduleSpotifyCheck()
+                                if (capturedAccessToken.get().isNotBlank()) {
+                                    scheduleSpotifyCheck()
+                                }
                             }
                         } else if (provider == "tidal" &&
                             (host.contains("api.tidal.com") || host.contains("listen.tidal.com"))
@@ -364,7 +398,7 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
                 if (!completed && provider == "spotify" && url != null &&
                     url.contains("open.spotify.com", ignoreCase = true)
                 ) {
-                    titleTv.text = "● CAPTURANDO SESIÓN // SPOTIFY…"
+                    titleTv.text = "● VERIFICANDO SESIÓN // SPOTIFY…"
                     view?.evaluateJavascript(SPOTIFY_TOKEN_HOOK_JS, null)
                 }
             }
@@ -373,17 +407,17 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
                 super.onPageFinished(view, url)
                 if (!completed && url != null) {
                     if (provider == "spotify" && url.contains("open.spotify.com", ignoreCase = true)) {
-                        titleTv.text = "● CAPTURANDO SESIÓN // SPOTIFY…"
+                        titleTv.text = "● VERIFICANDO SESIÓN // SPOTIFY…"
                         view?.evaluateJavascript(SPOTIFY_TOKEN_HOOK_JS, null)
-                        // Re-check once SPA hydrates API calls
                         mainHandler.postDelayed({
                             if (!completed) {
                                 view?.evaluateJavascript(SPOTIFY_TOKEN_HOOK_JS, null)
                                 checkSessionAndFinish(manualTap = false, currentUrl = webView.url ?: url)
                             }
-                        }, 1500L)
+                        }, 1800L)
+                    } else {
+                        checkSessionAndFinish(manualTap = false, currentUrl = url)
                     }
-                    checkSessionAndFinish(manualTap = false, currentUrl = url)
                 }
             }
 
@@ -392,8 +426,10 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
                 if (!completed && url != null) {
                     if (provider == "spotify" && url.contains("open.spotify.com", ignoreCase = true)) {
                         view?.evaluateJavascript(SPOTIFY_TOKEN_HOOK_JS, null)
+                        scheduleSpotifyCheck()
+                    } else {
+                        checkSessionAndFinish(manualTap = false, currentUrl = url)
                     }
-                    checkSessionAndFinish(manualTap = false, currentUrl = url)
                 }
             }
         }
@@ -403,7 +439,7 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
 
         val loginUrl = when (provider) {
             "ytmusic" -> "https://accounts.google.com/ServiceLogin?service=youtube&uilel=3&passive=true&continue=https%3A%2F%2Fmusic.youtube.com%2F"
-            "spotify" -> "https://accounts.spotify.com/login?continue=https%3A%2F%2Fopen.spotify.com%2F"
+            "spotify" -> "https://accounts.spotify.com/es/login?continue=https%3A%2F%2Fopen.spotify.com%2F"
             "soundcloud" -> "https://soundcloud.com/signin"
             "tidal" -> "https://listen.tidal.com/"
             else -> "https://music.youtube.com/"
@@ -420,6 +456,77 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
         val spDc = mergedMap["sp_dc"].orEmpty()
         val header = mergedMap.entries.joinToString("; ") { "${it.key}=${it.value}" }
         return header to spDc
+    }
+
+    private fun verifySpotifyAndComplete(
+        cookies: String,
+        spDc: String,
+        accessTok: String,
+        clientTok: String,
+        manualTap: Boolean
+    ) {
+        if (completed) return
+        if (!verifyingSpotify.compareAndSet(false, true)) return
+
+        verifyExecutor.execute {
+            try {
+                val conn = (URL("https://api.spotify.com/v1/me").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 7500
+                    readTimeout = 7500
+                    setRequestProperty("Authorization", "Bearer $accessTok")
+                    setRequestProperty("User-Agent", SPOTIFY_DESKTOP_CHROME_UA)
+                    setRequestProperty("Origin", "https://open.spotify.com")
+                    setRequestProperty("Referer", "https://open.spotify.com/")
+                    setRequestProperty("Accept", "application/json")
+                    if (clientTok.isNotBlank()) {
+                        setRequestProperty("client-token", clientTok)
+                    }
+                }
+                val code = try {
+                    conn.responseCode
+                } catch (_: Throwable) {
+                    0
+                }
+                val body = try {
+                    if (code in 200..299) {
+                        conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                    } else null
+                } catch (_: Throwable) {
+                    null
+                } finally {
+                    conn.disconnect()
+                }
+
+                if (code == 200 && !body.isNullOrBlank()) {
+                    val me = runCatching { JSONObject(body) }.getOrNull()
+                    val displayName = me?.optString("display_name", "")
+                        ?.ifBlank { me.optString("id", "") }
+                        ?.ifBlank { "Spotify" } ?: "Spotify"
+                    mainHandler.post {
+                        verifyingSpotify.set(false)
+                        if (!completed) {
+                            completeWithSession(cookies, spDc, displayName, accessTok, clientTok)
+                        }
+                    }
+                } else {
+                    // Reject invalid / anonymous token and keep WebView open for real login
+                    capturedAccessToken.set("")
+                    mainHandler.post {
+                        verifyingSpotify.set(false)
+                        if (manualTap && !completed) {
+                            Toast.makeText(
+                                this@RyotunesAccountAuthActivity,
+                                "Spotify aún no validó la sesión (HTTP $code). Espera 2s en open.spotify.com y reintenta.",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                }
+            } catch (_: Throwable) {
+                verifyingSpotify.set(false)
+            }
+        }
     }
 
     private fun checkSessionAndFinish(manualTap: Boolean, currentUrl: String = webView.url ?: "") {
@@ -451,27 +558,69 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
                 val accessTok = capturedAccessToken.get()
                 val clientTok = capturedClientToken.get()
 
-                // Never auto-close while still on accounts.spotify.com — wait for open.spotify.com + real Bearer token
-                if (spDc.isNotBlank() && accessTok.isNotBlank() && !onAccounts && (onOpenSpotify || manualTap)) {
-                    completeWithSession(cookies, spDc, "Spotify", accessTok, clientTok)
+                if (spDc.isBlank()) {
+                    if (manualTap) {
+                        Toast.makeText(this, "Completa el acceso a Spotify antes de pulsar LISTO", Toast.LENGTH_SHORT).show()
+                    }
                     return
                 }
 
-                if (manualTap) {
-                    if (spDc.isNotBlank() && !onOpenSpotify) {
-                        Toast.makeText(this, "Cargando Spotify Web para capturar tu sesión…", Toast.LENGTH_SHORT).show()
+                if (onAccounts || !onOpenSpotify) {
+                    if (manualTap) {
+                        Toast.makeText(this, "Abriendo open.spotify.com para validar sesión…", Toast.LENGTH_SHORT).show()
                         webView.loadUrl("https://open.spotify.com/")
-                    } else if (spDc.isNotBlank() && onOpenSpotify) {
+                    }
+                    return
+                }
+
+                // Confirm page is NOT blocked with DRM error before validating against /v1/me
+                val drmCheckJs = """
+                    (function(){
+                      var t = (document.body && document.body.innerText) ? document.body.innerText.toLowerCase() : '';
+                      if (t.indexOf('reproducción deshabilitada') >= 0 || t.indexOf('reproduccion deshabilitada') >= 0 || t.indexOf('playback disabled') >= 0) {
+                        return 'DRM_BLOCKED';
+                      }
+                      return 'OK';
+                    })();
+                """.trimIndent()
+
+                webView.evaluateJavascript(drmCheckJs) { res ->
+                    if (completed) return@evaluateJavascript
+                    val blocked = res?.contains("DRM_BLOCKED") == true
+                    if (blocked) {
+                        if (manualTap) {
+                            Toast.makeText(
+                                this,
+                                "Spotify mostró 'Reproducción deshabilitada'. Recargando con DRM habilitado…",
+                                Toast.LENGTH_LONG
+                            ).show()
+                            webView.reload()
+                        }
+                        return@evaluateJavascript
+                    }
+
+                    val latestTok = capturedAccessToken.get()
+                    val latestClient = capturedClientToken.get()
+                    if (latestTok.isNotBlank()) {
+                        verifySpotifyAndComplete(cookies, spDc, latestTok, latestClient, manualTap)
+                    } else if (manualTap) {
                         webView.evaluateJavascript(SPOTIFY_TOKEN_HOOK_JS, null)
+                        Toast.makeText(this, "Capturando token de Spotify… espera 2 segundos", Toast.LENGTH_SHORT).show()
                         mainHandler.postDelayed({
                             if (completed) return@postDelayed
-                            val (latestCookies, latestSpDc) = readSpotifyCookies(CookieManager.getInstance())
-                            val tokNow = capturedAccessToken.get()
-                            val ctNow = capturedClientToken.get()
-                            completeWithSession(latestCookies, latestSpDc.ifBlank { spDc }, "Spotify", tokNow, ctNow)
-                        }, 650L)
-                    } else {
-                        Toast.makeText(this, "Completa el acceso a Spotify antes de pulsar LISTO", Toast.LENGTH_SHORT).show()
+                            val tokAfter = capturedAccessToken.get()
+                            val ctAfter = capturedClientToken.get()
+                            if (tokAfter.isNotBlank()) {
+                                val (cNow, dcNow) = readSpotifyCookies(CookieManager.getInstance())
+                                verifySpotifyAndComplete(cNow, dcNow.ifBlank { spDc }, tokAfter, ctAfter, true)
+                            } else {
+                                Toast.makeText(
+                                    this,
+                                    "Aún no se capturó el token. Toca 'Tu biblioteca' en Spotify Web y vuelve a pulsar LISTO.",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        }, 1500L)
                     }
                 }
             }
@@ -562,6 +711,7 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         mainHandler.removeCallbacksAndMessages(null)
+        verifyExecutor.shutdownNow()
         if (::webView.isInitialized) {
             webView.stopLoading()
             webView.destroy()

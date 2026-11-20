@@ -8,6 +8,8 @@ import android.os.Handler
 import android.os.Looper
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
+import android.webkit.PermissionRequest
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
@@ -388,20 +390,37 @@ object RyotunesAccountSync {
         }
     }
 
-    // ── Spotify (Captured Bearer + Invisible Headless WebView Refresh) ───────
+    // ── Spotify (DRM-Enabled Desktop WebView + Dual-Path Vía A / Vía B) ──────
 
     private const val SPOTIFY_TOKEN_MAX_AGE_MS = 45L * 60L * 1000L
 
+    private data class HeadlessSpotifyResult(
+        val accessToken: String = "",
+        val clientToken: String = "",
+        val playlistsJson: String = "",
+        val likedTracksJson: String = "",
+        val domPlaylistsJson: String = "",
+        val drmBlocked: Boolean = false
+    )
+
     @SuppressLint("SetJavaScriptEnabled", "AddJavascriptInterface")
-    private fun refreshSpotifyTokensHeadless(context: Context): Pair<String, String>? {
+    private fun runSpotifyHeadlessSession(
+        context: Context,
+        extractPlaylists: Boolean
+    ): HeadlessSpotifyResult? {
         if (Looper.myLooper() == Looper.getMainLooper()) return null
         val session = RyotunesAccountVault.getSession(context, "spotify") ?: return null
         val latch = CountDownLatch(1)
         val tokenRef = AtomicReference("")
         val clientRef = AtomicReference("")
+        val playlistsJsonRef = AtomicReference("")
+        val likedJsonRef = AtomicReference("")
+        val domPlaylistsRef = AtomicReference("")
+        val drmBlockedRef = AtomicReference(false)
         val webViewRef = AtomicReference<WebView?>(null)
         val mainHandler = Handler(Looper.getMainLooper())
         var released = false
+        var fetchTriggered = false
 
         fun finishOnce() {
             if (released) return
@@ -430,18 +449,97 @@ object RyotunesAccountSync {
                     domStorageEnabled = true
                     @Suppress("DEPRECATION")
                     databaseEnabled = true
-                    userAgentString = RyotunesAccountAuthActivity.CLEAN_CHROME_UA
+                    mediaPlaybackRequiresUserGesture = false
+                    mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                    userAgentString = RyotunesAccountAuthActivity.SPOTIFY_DESKTOP_CHROME_UA
+                }
+
+                // Grant Widevine DRM so open.spotify.com Web Player initializes cleanly
+                wv.webChromeClient = object : WebChromeClient() {
+                    override fun onPermissionRequest(request: PermissionRequest) {
+                        val allowed = request.resources.filter {
+                            it == PermissionRequest.RESOURCE_PROTECTED_MEDIA_ID
+                        }.toTypedArray()
+                        if (allowed.isNotEmpty()) request.grant(allowed) else request.deny()
+                    }
+                }
+
+                fun triggerInPageExtraction(view: WebView?) {
+                    if (!extractPlaylists || fetchTriggered || view == null) return
+                    fetchTriggered = true
+                    val tokEsc = JSONObject.quote(tokenRef.get())
+                    val ctEsc = JSONObject.quote(clientRef.get())
+                    val extractJs = """
+                        (async function() {
+                          try {
+                            var bodyText = (document.body && document.body.innerText) ? document.body.innerText.toLowerCase() : '';
+                            if (bodyText.indexOf('reproducción deshabilitada') >= 0 || bodyText.indexOf('playback disabled') >= 0) {
+                              window.RyotunesTokenBridge.onDrmBlocked();
+                              return;
+                            }
+                            var tok = $tokEsc;
+                            var ct = $ctEsc;
+                            var hdrs = { 'Accept': 'application/json' };
+                            if (tok) hdrs['Authorization'] = 'Bearer ' + tok;
+                            if (ct) hdrs['client-token'] = ct;
+
+                            var plJson = '';
+                            var likedJson = '';
+                            if (tok) {
+                              try {
+                                var r1 = await fetch('https://api.spotify.com/v1/me/playlists?limit=50', { headers: hdrs });
+                                if (r1 && r1.ok) plJson = await r1.text();
+                              } catch (e) {}
+                              try {
+                                var r2 = await fetch('https://api.spotify.com/v1/me/tracks?limit=50', { headers: hdrs });
+                                if (r2 && r2.ok) likedJson = await r2.text();
+                              } catch (e) {}
+                            }
+
+                            var domList = [];
+                            try {
+                              var seen = {};
+                              var anchors = document.querySelectorAll('a[href^="/playlist/"]');
+                              for (var i = 0; i < anchors.length; i++) {
+                                var a = anchors[i];
+                                var href = a.getAttribute('href') || '';
+                                var m = href.match(/\/playlist\/([A-Za-z0-9]+)/);
+                                if (!m || seen[m[1]]) continue;
+                                seen[m[1]] = true;
+                                var name = (a.innerText || a.getAttribute('aria-label') || '').split('\n')[0].trim();
+                                var imgEl = a.querySelector('img');
+                                var img = imgEl ? (imgEl.getAttribute('src') || '') : '';
+                                if (name) domList.push({ id: m[1], name: name, image: img });
+                              }
+                            } catch (e) {}
+
+                            window.RyotunesTokenBridge.onExtracted(plJson, likedJson, JSON.stringify(domList));
+                          } catch (e) {
+                            try { window.RyotunesTokenBridge.onExtracted('', '', '[]'); } catch (e2) {}
+                          }
+                        })();
+                    """.trimIndent()
+                    mainHandler.post { runCatching { view.evaluateJavascript(extractJs, null) } }
                 }
 
                 var gracePosted = false
                 fun onCaptured(tok: String, ct: String) {
-                    if (tok.length > 20) tokenRef.set(tok)
+                    if (tok.length > 24) tokenRef.set(tok)
                     if (ct.length > 10) clientRef.set(ct)
-                    if (tokenRef.get().isNotBlank() && clientRef.get().isNotBlank()) {
-                        finishOnce()
-                    } else if (tokenRef.get().isNotBlank() && !gracePosted) {
-                        gracePosted = true
-                        mainHandler.postDelayed({ finishOnce() }, 400L)
+                    if (!extractPlaylists) {
+                        if (tokenRef.get().isNotBlank() && clientRef.get().isNotBlank()) {
+                            finishOnce()
+                        } else if (tokenRef.get().isNotBlank() && !gracePosted) {
+                            gracePosted = true
+                            mainHandler.postDelayed({ finishOnce() }, 450L)
+                        }
+                    } else if (tokenRef.get().isNotBlank() && !fetchTriggered) {
+                        if (clientRef.get().isNotBlank()) {
+                            triggerInPageExtraction(webViewRef.get())
+                        } else if (!gracePosted) {
+                            gracePosted = true
+                            mainHandler.postDelayed({ triggerInPageExtraction(webViewRef.get()) }, 550L)
+                        }
                     }
                 }
 
@@ -449,6 +547,20 @@ object RyotunesAccountSync {
                     @JavascriptInterface
                     fun onToken(accessToken: String?, clientToken: String?) {
                         onCaptured(accessToken?.trim().orEmpty(), clientToken?.trim().orEmpty())
+                    }
+
+                    @JavascriptInterface
+                    fun onExtracted(plJson: String?, likedJson: String?, domJson: String?) {
+                        if (!plJson.isNullOrBlank()) playlistsJsonRef.set(plJson)
+                        if (!likedJson.isNullOrBlank()) likedJsonRef.set(likedJson)
+                        if (!domJson.isNullOrBlank()) domPlaylistsRef.set(domJson)
+                        finishOnce()
+                    }
+
+                    @JavascriptInterface
+                    fun onDrmBlocked() {
+                        drmBlockedRef.set(true)
+                        finishOnce()
                     }
                 }, "RyotunesTokenBridge")
 
@@ -494,6 +606,13 @@ object RyotunesAccountSync {
                         super.onPageFinished(view, url)
                         if (url != null && url.contains("open.spotify.com", ignoreCase = true)) {
                             view?.evaluateJavascript(RyotunesAccountAuthActivity.SPOTIFY_TOKEN_HOOK_JS, null)
+                            if (extractPlaylists) {
+                                mainHandler.postDelayed({
+                                    if (!released && !fetchTriggered) {
+                                        triggerInPageExtraction(webViewRef.get())
+                                    }
+                                }, 3200L)
+                            }
                         }
                     }
                 }
@@ -504,7 +623,8 @@ object RyotunesAccountSync {
             }
         }
 
-        runCatching { latch.await(8500L, TimeUnit.MILLISECONDS) }
+        val waitMs = if (extractPlaylists) 11_500L else 8_500L
+        runCatching { latch.await(waitMs, TimeUnit.MILLISECONDS) }
 
         mainHandler.post {
             runCatching {
@@ -520,9 +640,20 @@ object RyotunesAccountSync {
         val freshClient = clientRef.get()
         if (freshToken.isNotBlank()) {
             RyotunesAccountVault.updateTokens(context, "spotify", freshToken, freshClient)
-            return freshToken to freshClient
         }
-        return null
+        return HeadlessSpotifyResult(
+            accessToken = freshToken,
+            clientToken = freshClient,
+            playlistsJson = playlistsJsonRef.get(),
+            likedTracksJson = likedJsonRef.get(),
+            domPlaylistsJson = domPlaylistsRef.get(),
+            drmBlocked = drmBlockedRef.get()
+        )
+    }
+
+    private fun refreshSpotifyTokensHeadless(context: Context): Pair<String, String>? {
+        val res = runSpotifyHeadlessSession(context, extractPlaylists = false) ?: return null
+        return if (res.accessToken.isNotBlank()) res.accessToken to res.clientToken else null
     }
 
     private fun resolveSpotifyAuthHeaders(context: Context, forceRefresh: Boolean = false): Map<String, String> {
@@ -549,35 +680,15 @@ object RyotunesAccountSync {
             }
         }
 
-        // Legacy fallback only if headless WebView could not capture a Bearer token
-        if (accessToken.isBlank() && session.primaryToken.isNotBlank()) {
-            runCatching {
-                val raw = httpGetText(
-                    "https://open.spotify.com/get_access_token?reason=transport&productType=web_player",
-                    mapOf(
-                        "Cookie" to "sp_dc=${session.primaryToken}",
-                        "User-Agent" to WEB_UA,
-                        "Accept" to "application/json"
-                    ),
-                    7000
-                )
-                if (!raw.isNullOrBlank()) {
-                    val tok = JSONObject(raw).optString("accessToken", "")
-                    if (tok.isNotBlank()) {
-                        accessToken = tok
-                        RyotunesAccountVault.updateTokens(context, "spotify", tok, clientToken)
-                    }
-                }
-            }
-        }
-
         if (accessToken.isBlank()) {
-            throw IllegalStateException("Sesión de Spotify expirada; vuelve a conectar tu cuenta en Studio → Accounts")
+            throw IllegalStateException("No se obtuvo un Bearer Token válido de Spotify. Desconecta y vuelve a iniciar sesión.")
         }
 
         return buildMap {
             put("Authorization", "Bearer $accessToken")
-            put("User-Agent", WEB_UA)
+            put("User-Agent", RyotunesAccountAuthActivity.SPOTIFY_DESKTOP_CHROME_UA)
+            put("Origin", "https://open.spotify.com")
+            put("Referer", "https://open.spotify.com/")
             put("Accept", "application/json")
             put("Accept-Language", "es-ES,es;q=0.9,en;q=0.8")
             if (clientToken.isNotBlank()) {
@@ -597,17 +708,115 @@ object RyotunesAccountSync {
         return first
     }
 
+    private fun parseSpotifyLikedJson(
+        savedRaw: String,
+        playlistsArr: JSArray,
+        allTracksMap: LinkedHashMap<String, JSObject>,
+        likedIds: MutableList<String>
+    ) {
+        val items = runCatching { JSONObject(savedRaw).optJSONArray("items") }.getOrNull() ?: return
+        val idsArr = JSArray()
+        var firstArt = ""
+        for (i in 0 until items.length()) {
+            val trackObj = items.optJSONObject(i)?.optJSONObject("track") ?: continue
+            val mapped = mapSpotifyTrack(trackObj) ?: continue
+            val tid = mapped.optString("id", "")
+            if (tid.isNotEmpty()) {
+                allTracksMap[tid] = mapped
+                likedIds.add(tid)
+                idsArr.put(tid)
+                if (firstArt.isEmpty()) firstArt = mapped.optString("artwork", "")
+            }
+        }
+        if (idsArr.length() > 0) {
+            playlistsArr.put(JSObject().apply {
+                put("id", "PL:spotify:liked")
+                put("title", "Spotify · Tus Me Gusta")
+                put("subtitle", "${idsArr.length()} pistas · Spotify")
+                put("provider", "spotify")
+                put("artwork", firstArt)
+                put("trackIds", idsArr)
+                put("createdAt", System.currentTimeMillis())
+            })
+        }
+    }
+
+    private fun parseSpotifyPlaylistsJson(
+        context: Context,
+        plRaw: String,
+        playlistsArr: JSArray,
+        allTracksMap: LinkedHashMap<String, JSObject>,
+        seenPlaylistIds: HashSet<String>,
+        hydrateTracks: Boolean
+    ) {
+        val plItems = runCatching { JSONObject(plRaw).optJSONArray("items") }.getOrNull() ?: return
+        for (i in 0 until plItems.length()) {
+            val pl = plItems.optJSONObject(i) ?: continue
+            val plId = pl.optString("id", "")
+            val plTitle = pl.optString("name", "Spotify Playlist")
+            if (plId.isBlank() || !seenPlaylistIds.add(plId)) continue
+            val plArt = pl.optJSONArray("images")?.optJSONObject(0)?.optString("url", "") ?: ""
+            val tracksMeta = pl.optJSONObject("tracks")
+            val reportedTotal = tracksMeta?.optInt("total", 0) ?: 0
+            val tracksHref = tracksMeta?.optString("href", "").orEmpty()
+
+            val idsArr = JSArray()
+            if (hydrateTracks && i < 15) {
+                val trUrl = if (tracksHref.startsWith("https://api.spotify.com/")) {
+                    val sep = if (tracksHref.contains("?")) "&" else "?"
+                    "${tracksHref}${sep}limit=100"
+                } else {
+                    "https://api.spotify.com/v1/playlists/$plId/tracks?limit=100"
+                }
+                val (trCode, trRaw) = runCatching { spotifyApiGet(context, trUrl, 8500) }
+                    .getOrElse { 0 to null }
+                if (trCode in 200..299 && !trRaw.isNullOrBlank()) {
+                    val trItems = runCatching { JSONObject(trRaw).optJSONArray("items") }.getOrNull() ?: JSONArray()
+                    for (j in 0 until trItems.length()) {
+                        val trackObj = trItems.optJSONObject(j)?.optJSONObject("track") ?: continue
+                        val mapped = mapSpotifyTrack(trackObj) ?: continue
+                        val tid = mapped.optString("id", "")
+                        if (tid.isNotEmpty()) {
+                            allTracksMap[tid] = mapped
+                            idsArr.put(tid)
+                        }
+                    }
+                }
+            }
+
+            val countLabel = if (idsArr.length() > 0) idsArr.length() else reportedTotal
+            val subtitle = if (countLabel > 0) "$countLabel pistas · Spotify" else "Playlist · Spotify"
+            playlistsArr.put(JSObject().apply {
+                put("id", "PL:spotify:$plId")
+                put("title", plTitle)
+                put("subtitle", subtitle)
+                put("provider", "spotify")
+                put("artwork", plArt)
+                put("trackIds", idsArr)
+                put("createdAt", System.currentTimeMillis() - i)
+            })
+        }
+    }
+
     private fun syncSpotify(
         context: Context,
         session: RyotunesAccountVault.AccountSession
     ): JSObject {
-        // Ensure we have a live Bearer token before issuing batch calls
-        resolveSpotifyAuthHeaders(context, forceRefresh = false)
-
         var displayName = session.accountName
+        val playlistsArr = JSArray()
+        val allTracksMap = LinkedHashMap<String, JSObject>()
+        val likedIds = mutableListOf<String>()
+        val seenPlaylistIds = HashSet<String>()
+        var meCode = 0
+        var tracksCode = 0
+        var plCode = 0
+        var viaAError: String? = null
+
+        // ── VÍA A: Authenticated REST API ─────────────────────────────────────
         runCatching {
-            val (code, meRaw) = spotifyApiGet(context, "https://api.spotify.com/v1/me", 7500)
-            if (code in 200..299 && !meRaw.isNullOrBlank()) {
+            val (codeMe, meRaw) = spotifyApiGet(context, "https://api.spotify.com/v1/me", 7500)
+            meCode = codeMe
+            if (codeMe in 200..299 && !meRaw.isNullOrBlank()) {
                 val me = JSONObject(meRaw)
                 val name = me.optString("display_name", "").ifBlank { me.optString("id", "") }
                 if (name.isNotBlank()) {
@@ -615,112 +824,77 @@ object RyotunesAccountSync {
                     RyotunesAccountVault.updateAccountName(context, "spotify", name)
                 }
             }
+
+            val (codeSaved, savedRaw) = spotifyApiGet(context, "https://api.spotify.com/v1/me/tracks?limit=50", 9000)
+            tracksCode = codeSaved
+            if (codeSaved in 200..299 && !savedRaw.isNullOrBlank()) {
+                parseSpotifyLikedJson(savedRaw, playlistsArr, allTracksMap, likedIds)
+            }
+
+            val (codePl, plRaw) = spotifyApiGet(context, "https://api.spotify.com/v1/me/playlists?limit=50", 9500)
+            plCode = codePl
+            if (codePl in 200..299 && !plRaw.isNullOrBlank()) {
+                parseSpotifyPlaylistsJson(context, plRaw, playlistsArr, allTracksMap, seenPlaylistIds, hydrateTracks = true)
+            }
+        }.onFailure { err ->
+            viaAError = err.localizedMessage
         }
 
-        val playlistsArr = JSArray()
-        val allTracksMap = LinkedHashMap<String, JSObject>()
-        val likedIds = mutableListOf<String>()
-        var lastErrorStatus = 0
-
-        // 1) Liked Songs (/v1/me/tracks)
-        runCatching {
-            val (code, savedRaw) = spotifyApiGet(context, "https://api.spotify.com/v1/me/tracks?limit=50", 9000)
-            if (code in 200..299 && !savedRaw.isNullOrBlank()) {
-                val items = JSONObject(savedRaw).optJSONArray("items") ?: JSONArray()
-                val idsArr = JSArray()
-                var firstArt = ""
-                for (i in 0 until items.length()) {
-                    val trackObj = items.optJSONObject(i)?.optJSONObject("track") ?: continue
-                    val mapped = mapSpotifyTrack(trackObj) ?: continue
-                    val tid = mapped.optString("id", "")
-                    if (tid.isNotEmpty()) {
-                        allTracksMap[tid] = mapped
-                        likedIds.add(tid)
-                        idsArr.put(tid)
-                        if (firstArt.isEmpty()) firstArt = mapped.optString("artwork", "")
+        // ── VÍA B: Automatic DRM-Enabled WebView Fallback ─────────────────────
+        var drmBlocked = false
+        if (playlistsArr.length() == 0 && session.primaryToken.isNotBlank()) {
+            val headless = runSpotifyHeadlessSession(context, extractPlaylists = true)
+            if (headless != null) {
+                drmBlocked = headless.drmBlocked
+                if (headless.likedTracksJson.isNotBlank()) {
+                    parseSpotifyLikedJson(headless.likedTracksJson, playlistsArr, allTracksMap, likedIds)
+                }
+                if (headless.playlistsJson.isNotBlank()) {
+                    parseSpotifyPlaylistsJson(
+                        context,
+                        headless.playlistsJson,
+                        playlistsArr,
+                        allTracksMap,
+                        seenPlaylistIds,
+                        hydrateTracks = headless.accessToken.isNotBlank()
+                    )
+                }
+                if (playlistsArr.length() == 0 && headless.domPlaylistsJson.isNotBlank()) {
+                    val domArr = runCatching { JSONArray(headless.domPlaylistsJson) }.getOrNull() ?: JSONArray()
+                    for (i in 0 until domArr.length()) {
+                        val item = domArr.optJSONObject(i) ?: continue
+                        val pid = item.optString("id", "")
+                        val pname = item.optString("name", "")
+                        val pimg = item.optString("image", "")
+                        if (pid.isBlank() || pname.isBlank() || !seenPlaylistIds.add(pid)) continue
+                        playlistsArr.put(JSObject().apply {
+                            put("id", "PL:spotify:$pid")
+                            put("title", pname)
+                            put("subtitle", "Toca para cargar · Spotify")
+                            put("provider", "spotify")
+                            put("artwork", pimg)
+                            put("trackIds", JSArray())
+                            put("createdAt", System.currentTimeMillis() - i)
+                        })
                     }
                 }
-                if (idsArr.length() > 0) {
-                    playlistsArr.put(JSObject().apply {
-                        put("id", "PL:spotify:liked")
-                        put("title", "Spotify · Tus Me Gusta")
-                        put("subtitle", "${idsArr.length()} pistas · Spotify")
-                        put("provider", "spotify")
-                        put("artwork", firstArt)
-                        put("trackIds", idsArr)
-                        put("createdAt", System.currentTimeMillis())
-                    })
-                }
-            } else if (code > 0) {
-                lastErrorStatus = code
             }
         }
 
-        // 2) User Playlists (/v1/me/playlists?limit=50)
-        runCatching {
-            val (code, plRaw) = spotifyApiGet(context, "https://api.spotify.com/v1/me/playlists?limit=50", 9500)
-            if (code in 200..299 && !plRaw.isNullOrBlank()) {
-                val plItems = JSONObject(plRaw).optJSONArray("items") ?: JSONArray()
-                for (i in 0 until plItems.length()) {
-                    val pl = plItems.optJSONObject(i) ?: continue
-                    val plId = pl.optString("id", "")
-                    val plTitle = pl.optString("name", "Spotify Playlist")
-                    if (plId.isBlank()) continue
-                    val plArt = pl.optJSONArray("images")?.optJSONObject(0)?.optString("url", "") ?: ""
-                    val tracksMeta = pl.optJSONObject("tracks")
-                    val reportedTotal = tracksMeta?.optInt("total", 0) ?: 0
-                    val tracksHref = tracksMeta?.optString("href", "").orEmpty()
-
-                    val idsArr = JSArray()
-                    // Eagerly fetch tracks for the first 15 playlists; remaining playlists lazy-load on tap
-                    if (i < 15) {
-                        val trUrl = if (tracksHref.startsWith("https://api.spotify.com/")) {
-                            val sep = if (tracksHref.contains("?")) "&" else "?"
-                            "${tracksHref}${sep}limit=100"
-                        } else {
-                            "https://api.spotify.com/v1/playlists/$plId/tracks?limit=100"
-                        }
-                        val (trCode, trRaw) = runCatching { spotifyApiGet(context, trUrl, 8500) }
-                            .getOrElse { 0 to null }
-                        if (trCode in 200..299 && !trRaw.isNullOrBlank()) {
-                            val trItems = JSONObject(trRaw).optJSONArray("items") ?: JSONArray()
-                            for (j in 0 until trItems.length()) {
-                                val trackObj = trItems.optJSONObject(j)?.optJSONObject("track") ?: continue
-                                val mapped = mapSpotifyTrack(trackObj) ?: continue
-                                val tid = mapped.optString("id", "")
-                                if (tid.isNotEmpty()) {
-                                    allTracksMap[tid] = mapped
-                                    idsArr.put(tid)
-                                }
-                            }
-                        }
-                    }
-
-                    val countLabel = if (idsArr.length() > 0) idsArr.length() else reportedTotal
-                    val subtitle = if (countLabel > 0) {
-                        "$countLabel pistas · Spotify"
-                    } else {
-                        "Playlist · Spotify"
-                    }
-                    playlistsArr.put(JSObject().apply {
-                        put("id", "PL:spotify:$plId")
-                        put("title", plTitle)
-                        put("subtitle", subtitle)
-                        put("provider", "spotify")
-                        put("artwork", plArt)
-                        put("trackIds", idsArr)
-                        put("createdAt", System.currentTimeMillis() - i)
-                    })
-                }
-            } else if (code > 0) {
-                lastErrorStatus = code
+        // ── Real Diagnostics (never mask 401/403/DRM errors) ──────────────────
+        if (playlistsArr.length() == 0) {
+            if (drmBlocked) {
+                throw IllegalStateException("Spotify bloqueó el reproductor web (DRM). Desconecta y vuelve a iniciar sesión.")
             }
-        }
-
-        if (playlistsArr.length() == 0 && lastErrorStatus in listOf(401, 403)) {
-            throw IllegalStateException(
-                "Spotify rechazó la sesión (HTTP $lastErrorStatus). Desconecta y vuelve a iniciar sesión."
-            )
+            val failedCode = listOf(plCode, tracksCode, meCode).firstOrNull { it != 0 && it !in 200..299 } ?: 0
+            if (failedCode != 0) {
+                throw IllegalStateException(
+                    "Spotify devolvió HTTP $failedCode al sincronizar playlists. Desconecta y vuelve a conectar tu cuenta."
+                )
+            }
+            if (!viaAError.isNullOrBlank()) {
+                throw IllegalStateException("Error al sincronizar Spotify: $viaAError")
+            }
         }
 
         val tracksArr = JSArray()

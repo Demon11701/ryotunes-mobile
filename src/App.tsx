@@ -387,7 +387,15 @@ const RyotunesShell: React.FC = () => {
           </div>
 
           {/* Active Tab Scroll Content */}
-          <div style={{ position: 'relative', flex: 1, minHeight: 0, overflowY: 'auto', padding: '14px 14px 8px' }}>
+          <div
+            style={{
+              position: 'relative',
+              flex: 1,
+              minHeight: 0,
+              overflowY: 'auto',
+              padding: '14px 14px calc(164px + env(safe-area-inset-bottom))',
+            }}
+          >
             {activeTab === 'explore' && exploreSubView === 'search' && (
               <SearchPage initialQuery={libParam} onNavigate={navigateLibrary} />
             )}

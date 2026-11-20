@@ -224,7 +224,15 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   );
 
   return (
-    <div className="page-reenter" style={{ display: 'flex', flexDirection: 'column', gap: 18, paddingBottom: 28 }}>
+    <div
+      className="page-reenter"
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 18,
+        paddingBottom: 'calc(164px + env(safe-area-inset-bottom))',
+      }}
+    >
       <div>
         <div className="font-mono-tech" style={{ fontSize: 10, color: 'var(--ink-faint)', letterSpacing: 1.4 }}>
           力 // RYOTUNES SETTINGS {decor === 'rich' ? '· 設定' : ''}
