@@ -57,10 +57,37 @@ export interface Playlist {
   id: string;
   title: string;
   subtitle?: string;
+  provider?: ProviderId;
   trackIds: string[];
   artwork?: string;
   smart?: boolean;
   createdAt: number;
+}
+
+export type AccountProviderId = 'ytmusic' | 'spotify' | 'soundcloud' | 'tidal';
+
+export interface AccountStatus {
+  provider: AccountProviderId;
+  connected: boolean;
+  accountName: string;
+  connectedAt: number;
+}
+
+export type AccountsMap = Record<AccountProviderId, AccountStatus>;
+
+export interface AppVersionInfo {
+  versionName: string;
+  versionCode: number;
+}
+
+export interface GithubUpdateInfo {
+  hasUpdate: boolean;
+  currentVersion: string;
+  latestVersion: string;
+  releaseNotes: string;
+  apkUrl: string;
+  apkSizeBytes: number;
+  publishedAt: string;
 }
 
 export interface AlbumGroup {

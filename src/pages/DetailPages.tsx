@@ -36,7 +36,8 @@ export const DetailPage: React.FC<DetailPageProps> = ({ kind, id, onBack }) => {
     const pl = playlists.find((p) => p.id === id);
     title = pl?.title || 'Playlist';
     list = (pl?.trackIds || []).map((tid) => trackMap.get(tid)).filter((t): t is NonNullable<typeof t> => Boolean(t));
-    artwork = list.find((t) => t.artwork)?.artwork;
+    artwork = pl?.artwork || list.find((t) => t.artwork)?.artwork;
+    if (pl?.provider) eyebrow = `PLAYLIST // ${pl.provider.toUpperCase()}`;
     meta = `${list.length} songs · ${pl?.subtitle || 'Device playlist'}`;
   } else if (kind === 'album') {
     const alb = albums.find((a) => a.id === id);

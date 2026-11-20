@@ -32,12 +32,17 @@ export const LibraryPage: React.FC<LibraryPageProps> = ({ initialTab = 'songs', 
     syncDeviceLibrary,
     createPlaylist,
     removeOffline,
+    accounts,
+    importingPlaylistUrl,
+    importPlaylistUrl,
   } = useAudio();
 
   const [tab, setTab] = useState<LibraryTab>(initialTab);
   const [localFilter, setLocalFilter] = useState('');
   const [newName, setNewName] = useState('');
   const [showNew, setShowNew] = useState(false);
+  const [importUrl, setImportUrl] = useState('');
+  const [showImport, setShowImport] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -305,24 +310,140 @@ export const LibraryPage: React.FC<LibraryPageProps> = ({ initialTab = 'songs', 
       )}
 
       {tab === 'playlists' && (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(144px, 1fr))', gap: 16 }}>
-          {playlists.map((pl) => {
-            const arts = pl.trackIds
-              .map((id) => trackMap.get(id)?.artwork)
-              .filter((u): u is string => Boolean(u));
-            return (
-              <MediaCard
-                key={pl.id}
-                title={pl.title}
-                subtitle={`${pl.trackIds.length} songs`}
-                artwork={arts[0]}
-                collage={arts.length >= 4 ? arts.slice(0, 4) : undefined}
-                placeholderIcon={pl.smart ? 'on-repeat' : 'playlist'}
-                width={144}
-                onOpen={() => onNavigate('playlist', pl.id)}
-              />
-            );
-          })}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div
+            style={{
+              padding: 12,
+              borderRadius: 'var(--radius-card)',
+              backgroundColor: 'var(--paper-lift)',
+              border: '1px solid var(--line-soft)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 10,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+              <div>
+                <div className="font-mono-tech" style={{ fontSize: 10, color: 'var(--accent)', letterSpacing: 1.2 }}>
+                  CLOUD SYNC &amp; PLAYLISTS · 鍵
+                </div>
+                <div style={{ fontSize: 12.5, color: 'var(--ink-muted)', marginTop: 2 }}>
+                  {Object.values(accounts).filter((a) => a.connected).length} cuenta(s) conectada(s) · toca cualquier playlist para guardarla offline.
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  onClick={() => onNavigate('settings', 'accounts')}
+                  className="font-mono-tech ryo-pressable"
+                  style={{
+                    height: 32,
+                    padding: '0 12px',
+                    borderRadius: 999,
+                    backgroundColor: 'var(--bone)',
+                    color: 'var(--ink-on-bone)',
+                    border: 'none',
+                    fontSize: 10.5,
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  CONECTAR CUENTAS
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowImport((s) => !s)}
+                  className="font-mono-tech ryo-pressable"
+                  style={{
+                    height: 32,
+                    padding: '0 12px',
+                    borderRadius: 999,
+                    backgroundColor: 'var(--paper)',
+                    color: 'var(--ink)',
+                    border: '1px solid var(--line)',
+                    fontSize: 10.5,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {showImport ? 'CERRAR ENLACE' : '+ IMPORTAR ENLACE'}
+                </button>
+              </div>
+            </div>
+
+            {showImport && (
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <input
+                  type="url"
+                  value={importUrl}
+                  onChange={(e) => setImportUrl(e.target.value)}
+                  placeholder="Pega enlace de playlist (YouTube Music, Spotify, SoundCloud, TIDAL)..."
+                  style={{
+                    flex: '1 1 200px',
+                    height: 36,
+                    borderRadius: 'var(--radius)',
+                    backgroundColor: 'var(--paper)',
+                    border: '1px solid var(--line)',
+                    color: 'var(--ink)',
+                    padding: '0 12px',
+                    fontSize: 13,
+                    outline: 'none',
+                  }}
+                />
+                <button
+                  type="button"
+                  disabled={importingPlaylistUrl || !importUrl.trim()}
+                  onClick={async () => {
+                    const pl = await importPlaylistUrl(importUrl);
+                    if (pl) {
+                      setImportUrl('');
+                      setShowImport(false);
+                      onNavigate('playlist', pl.id);
+                    }
+                  }}
+                  className="font-mono-tech ryo-pressable"
+                  style={{
+                    height: 36,
+                    padding: '0 14px',
+                    borderRadius: 999,
+                    backgroundColor: 'var(--accent)',
+                    color: '#FFFFFF',
+                    border: 'none',
+                    fontSize: 11,
+                    fontWeight: 700,
+                    opacity: importingPlaylistUrl || !importUrl.trim() ? 0.5 : 1,
+                    cursor: importingPlaylistUrl ? 'wait' : 'pointer',
+                  }}
+                >
+                  {importingPlaylistUrl ? 'IMPORTANDO…' : 'IMPORTAR'}
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(144px, 1fr))', gap: 16 }}>
+            {playlists.map((pl) => {
+              const plTracks = pl.trackIds
+                .map((id) => trackMap.get(id))
+                .filter((t): t is NonNullable<typeof t> => Boolean(t));
+              const arts = plTracks
+                .map((t) => t.artwork)
+                .filter((u): u is string => Boolean(u));
+              return (
+                <MediaCard
+                  key={pl.id}
+                  title={pl.title}
+                  subtitle={pl.subtitle || `${pl.trackIds.length} songs`}
+                  artwork={pl.artwork || arts[0]}
+                  collage={!pl.artwork && arts.length >= 4 ? arts.slice(0, 4) : undefined}
+                  placeholderIcon={pl.smart ? 'on-repeat' : 'playlist'}
+                  width={144}
+                  onOpen={() => onNavigate('playlist', pl.id)}
+                  onPlay={() => plTracks[0] && playTrack(plTracks[0], plTracks)}
+                />
+              );
+            })}
+          </div>
         </div>
       )}
 

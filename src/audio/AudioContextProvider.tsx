@@ -5,6 +5,7 @@ import { parseAudioFile } from './id3Reader';
 import {
   isAndroidNative,
   mapNativeScanTracks,
+  NativeSyncedTrackItem,
   RyotunesNativeMedia,
 } from './NativeMediaBridge';
 import {
@@ -16,6 +17,8 @@ import {
   resolvePlayableTrack,
 } from './providerService';
 import {
+  AccountProviderId,
+  AccountsMap,
   AlbumGroup,
   ArtistGroup,
   AudioFxState,
@@ -100,10 +103,25 @@ interface AudioContextValue {
   downloadTracksBatch: (tracksToSave: Track[], label?: string) => Promise<void>;
   removeOffline: (trackId: string) => Promise<void>;
   clearOfflineAndCache: () => Promise<void>;
+  accounts: AccountsMap;
+  syncingAccount: AccountProviderId | null;
+  importingPlaylistUrl: boolean;
+  refreshAccounts: () => Promise<AccountsMap>;
+  connectAccount: (provider: AccountProviderId) => Promise<boolean>;
+  disconnectAccount: (provider: AccountProviderId) => Promise<void>;
+  syncAccount: (provider: AccountProviderId) => Promise<{ playlistCount: number; trackCount: number }>;
+  importPlaylistUrl: (url: string) => Promise<Playlist | null>;
   showToast: (text: string, kind?: 'info' | 'success' | 'error') => void;
 }
 
 const AudioPlayerContext = createContext<AudioContextValue | null>(null);
+
+const DEFAULT_ACCOUNTS: AccountsMap = {
+  ytmusic: { provider: 'ytmusic', connected: false, accountName: '', connectedAt: 0 },
+  spotify: { provider: 'spotify', connected: false, accountName: '', connectedAt: 0 },
+  soundcloud: { provider: 'soundcloud', connected: false, accountName: '', connectedAt: 0 },
+  tidal: { provider: 'tidal', connected: false, accountName: '', connectedAt: 0 },
+};
 
 const DEFAULT_FX: AudioFxState = {
   speed: 1,
@@ -151,6 +169,9 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [lyricsMap, setLyricsMap] = useState<Record<string, LyricsDoc>>({});
   const [lyricsLoadingId, setLyricsLoadingId] = useState<string | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
+  const [accounts, setAccounts] = useState<AccountsMap>(DEFAULT_ACCOUNTS);
+  const [syncingAccount, setSyncingAccount] = useState<AccountProviderId | null>(null);
+  const [importingPlaylistUrl, setImportingPlaylistUrl] = useState<boolean>(false);
 
   const offlineMap = useMemo(() => {
     const m = new Map<string, Track>();
@@ -459,8 +480,26 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, [preventDuplicates]);
 
   useEffect(() => {
-    const compact = onlineTracks.slice(0, 24).map((t) => ({ ...t, src: '' }));
-    localStorage.setItem('ryotunes_online_history', JSON.stringify(compact));
+    try {
+      const compact = onlineTracks.slice(0, 600).map((t) => ({
+        id: t.id,
+        title: t.title,
+        artist: t.artist,
+        album: t.album,
+        duration: t.duration,
+        src: '',
+        artwork: t.artwork,
+        format: t.format,
+        source: t.source,
+        provider: t.provider,
+        remoteId: t.remoteId,
+        originalId: t.originalId,
+        addedAt: t.addedAt,
+      }));
+      localStorage.setItem('ryotunes_online_history', JSON.stringify(compact));
+    } catch {
+      // Ignore storage quota overflow
+    }
   }, [onlineTracks]);
 
   // Hydrate persistent offline library on startup (IndexedDB on Web / filesDir on Android)
@@ -1479,6 +1518,206 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     showToast('Cleared stream caches and offline downloads', 'success');
   }, [showToast]);
 
+  const refreshAccounts = useCallback(async (): Promise<AccountsMap> => {
+    if (!nativeAndroid) return DEFAULT_ACCOUNTS;
+    try {
+      const res = await RyotunesNativeMedia.getConnectedAccounts();
+      const merged: AccountsMap = {
+        ytmusic: res?.ytmusic ?? DEFAULT_ACCOUNTS.ytmusic,
+        spotify: res?.spotify ?? DEFAULT_ACCOUNTS.spotify,
+        soundcloud: res?.soundcloud ?? DEFAULT_ACCOUNTS.soundcloud,
+        tidal: res?.tidal ?? DEFAULT_ACCOUNTS.tidal,
+      };
+      setAccounts(merged);
+      return merged;
+    } catch {
+      return DEFAULT_ACCOUNTS;
+    }
+  }, [nativeAndroid]);
+
+  useEffect(() => {
+    if (nativeAndroid) {
+      refreshAccounts().catch(() => {});
+    }
+  }, [nativeAndroid, refreshAccounts]);
+
+  const mergeSyncedPlaylists = useCallback(
+    (incomingPlaylists: Playlist[], incomingTracks: NativeSyncedTrackItem[], incomingLikedIds: string[] = []) => {
+      const mappedTracks: Track[] = incomingTracks
+        .filter((t) => t && t.id && t.title)
+        .map((t) => ({
+          id: t.id,
+          title: t.title,
+          artist: t.artist || 'Unknown Artist',
+          album: t.album || t.provider?.toUpperCase() || 'Cloud',
+          duration: Number.isFinite(t.duration) ? t.duration : 0,
+          src: '',
+          artwork: t.artwork,
+          format: t.format || t.provider?.toUpperCase() || 'STREAM',
+          source: t.provider || 'youtube',
+          provider: t.provider || 'youtube',
+          remoteId: t.remoteId,
+          addedAt: Date.now(),
+        }));
+
+      if (mappedTracks.length > 0) {
+        setOnlineTracks((prev) => {
+          const map = new Map<string, Track>();
+          for (const t of mappedTracks) map.set(t.id, t);
+          for (const existing of prev) {
+            if (!map.has(existing.id)) map.set(existing.id, existing);
+          }
+          return Array.from(map.values()).slice(0, 600);
+        });
+      }
+
+      if (incomingPlaylists.length > 0) {
+        setPlaylists((prev) => {
+          const byId = new Map<string, Playlist>();
+          for (const p of incomingPlaylists) {
+            if (p && p.id) {
+              byId.set(p.id, {
+                ...p,
+                trackIds: Array.isArray(p.trackIds) ? p.trackIds : [],
+                createdAt: p.createdAt || Date.now(),
+              });
+            }
+          }
+          const remaining = prev.filter((p) => !byId.has(p.id));
+          const next = [...Array.from(byId.values()), ...remaining];
+          try {
+            localStorage.setItem('ryotunes_playlists', JSON.stringify(next));
+          } catch {
+            // ignore quota
+          }
+          return next;
+        });
+      }
+
+      if (incomingLikedIds.length > 0) {
+        setLikedIds((prev) => {
+          const mergedSet = new Set([...incomingLikedIds, ...prev]);
+          const next = Array.from(mergedSet);
+          try {
+            localStorage.setItem('ryotunes_likes', JSON.stringify(next));
+          } catch {
+            // ignore quota
+          }
+          return next;
+        });
+      }
+    },
+    []
+  );
+
+  const syncAccount = useCallback(
+    async (provider: AccountProviderId): Promise<{ playlistCount: number; trackCount: number }> => {
+      if (!nativeAndroid) {
+        showToast('La sincronización de cuentas está disponible en Android', 'info');
+        return { playlistCount: 0, trackCount: 0 };
+      }
+      setSyncingAccount(provider);
+      try {
+        const res = await RyotunesNativeMedia.syncAccountPlaylists({ provider });
+        const pls = Array.isArray(res?.playlists) ? res.playlists : [];
+        const trs = Array.isArray(res?.tracks) ? res.tracks : [];
+        const likes = Array.isArray(res?.likedIds) ? res.likedIds : [];
+        mergeSyncedPlaylists(pls, trs, likes);
+        await refreshAccounts();
+        if (pls.length > 0 || trs.length > 0) {
+          showToast(
+            `Sincronizado: ${pls.length} playlist${pls.length === 1 ? '' : 's'} · ${trs.length} pistas`,
+            'success'
+          );
+        } else {
+          showToast('Cuenta conectada, pero no se encontraron playlists todavía', 'info');
+        }
+        return { playlistCount: pls.length, trackCount: trs.length };
+      } catch (err) {
+        showToast(
+          err instanceof Error ? err.message : 'No se pudieron sincronizar las playlists',
+          'error'
+        );
+        return { playlistCount: 0, trackCount: 0 };
+      } finally {
+        setSyncingAccount(null);
+      }
+    },
+    [mergeSyncedPlaylists, nativeAndroid, refreshAccounts, showToast]
+  );
+
+  const connectAccount = useCallback(
+    async (provider: AccountProviderId): Promise<boolean> => {
+      if (!nativeAndroid) {
+        showToast('El inicio de sesión nativo funciona en la app de Android', 'info');
+        return false;
+      }
+      try {
+        const res = await RyotunesNativeMedia.connectAccount({ provider });
+        await refreshAccounts();
+        if (res?.connected) {
+          showToast(`Conectado: ${res.accountName || provider.toUpperCase()}`, 'success');
+          void syncAccount(provider);
+          return true;
+        }
+        return false;
+      } catch (err) {
+        showToast(
+          err instanceof Error ? err.message : 'No se pudo completar el inicio de sesión',
+          'error'
+        );
+        return false;
+      }
+    },
+    [nativeAndroid, refreshAccounts, showToast, syncAccount]
+  );
+
+  const disconnectAccount = useCallback(
+    async (provider: AccountProviderId): Promise<void> => {
+      if (!nativeAndroid) return;
+      try {
+        await RyotunesNativeMedia.disconnectAccount({ provider });
+        await refreshAccounts();
+        showToast(`Cuenta desconectada (${provider.toUpperCase()})`, 'info');
+      } catch {
+        showToast('Error al desconectar la cuenta', 'error');
+      }
+    },
+    [nativeAndroid, refreshAccounts, showToast]
+  );
+
+  const importPlaylistUrl = useCallback(
+    async (rawUrl: string): Promise<Playlist | null> => {
+      const cleaned = rawUrl.trim();
+      if (!cleaned) {
+        showToast('Pega un enlace de YouTube Music, Spotify, SoundCloud o TIDAL', 'info');
+        return null;
+      }
+      if (!nativeAndroid) {
+        showToast('La importación por enlace funciona en Android', 'info');
+        return null;
+      }
+      setImportingPlaylistUrl(true);
+      try {
+        const res = await RyotunesNativeMedia.importPlaylistByUrl({ url: cleaned });
+        if (!res?.playlist) throw new Error('No se pudo leer la playlist');
+        const trs = Array.isArray(res.tracks) ? res.tracks : [];
+        mergeSyncedPlaylists([res.playlist], trs, []);
+        showToast(`Importada "${res.playlist.title}" (${trs.length} pistas)`, 'success');
+        return res.playlist;
+      } catch (err) {
+        showToast(
+          err instanceof Error ? err.message : 'No se pudo importar el enlace de playlist',
+          'error'
+        );
+        return null;
+      } finally {
+        setImportingPlaylistUrl(false);
+      }
+    },
+    [mergeSyncedPlaylists, nativeAndroid, showToast]
+  );
+
   return (
     <AudioPlayerContext.Provider
       value={{
@@ -1546,6 +1785,14 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         downloadTracksBatch,
         removeOffline,
         clearOfflineAndCache,
+        accounts,
+        syncingAccount,
+        importingPlaylistUrl,
+        refreshAccounts,
+        connectAccount,
+        disconnectAccount,
+        syncAccount,
+        importPlaylistUrl,
         showToast,
       }}
     >

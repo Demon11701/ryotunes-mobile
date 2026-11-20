@@ -1,6 +1,7 @@
-import React, { useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AudioProvider, useAudio } from './audio/AudioContextProvider';
-import { LibraryPage as LibraryPageKind, LibraryTab } from './audio/types';
+import { RyotunesNativeMedia } from './audio/NativeMediaBridge';
+import { GithubUpdateInfo, LibraryPage as LibraryPageKind, LibraryTab } from './audio/types';
 import { Backdrop } from './components/Backdrop';
 import { BentoPlayerCard, StageCenterMode } from './components/BentoPlayerCard';
 import { BottomNavBar, MainTab } from './components/BottomNavBar';
@@ -10,17 +11,19 @@ import { SidebarDrawer } from './components/SidebarDrawer';
 import { SoundDialog } from './components/SoundDialog';
 import { Toast } from './components/Toast';
 import { TopMediaBar } from './components/TopMediaBar';
+import { UpdateBannerModal } from './components/UpdateBannerModal';
 import { VolumeOsd } from './components/VolumeOsd';
+import { WelcomeModal } from './components/WelcomeModal';
 import { Icon } from './icons/Icon';
 import { DetailPage } from './pages/DetailPages';
 import { HomePage } from './pages/HomePage';
 import { LibraryPage } from './pages/LibraryPage';
 import { SearchPage } from './pages/SearchPage';
-import { SettingsPage } from './pages/SettingsPage';
+import { SettingsPage, SettingsTab } from './pages/SettingsPage';
 import { ThemeProvider, useTheme } from './theme/ThemeContext';
 
 const RyotunesShell: React.FC = () => {
-  const { currentTrack, importLocalFiles, syncDeviceLibrary, isNativeAndroid } = useAudio();
+  const { currentTrack, importLocalFiles, syncDeviceLibrary, isNativeAndroid, showToast } = useAudio();
   const { bentoTokens } = useTheme();
   const [activeTab, setActiveTab] = useState<MainTab>('stage');
   const [stageCenterMode, setStageCenterMode] = useState<StageCenterMode>('art');
@@ -28,10 +31,71 @@ const RyotunesShell: React.FC = () => {
   const [libSubPage, setLibSubPage] = useState<'library' | 'playlist' | 'album' | 'artist'>('library');
   const [libParam, setLibParam] = useState<string>('');
   const [libTab, setLibTab] = useState<LibraryTab>('songs');
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>('accounts');
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [nowPlayingOpen, setNowPlayingOpen] = useState(false);
   const [soundOpen, setSoundOpen] = useState(false);
+  const [welcomeOpen, setWelcomeOpen] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('ryotunes_onboarded') !== 'true';
+    } catch {
+      return false;
+    }
+  });
+  const [appVersionLabel, setAppVersionLabel] = useState<string>('v1.3.0-beta.1');
+  const [updateInfo, setUpdateInfo] = useState<GithubUpdateInfo | null>(null);
+  const [updateModalOpen, setUpdateModalOpen] = useState<boolean>(false);
+  const [checkingUpdate, setCheckingUpdate] = useState<boolean>(false);
+  const [updateStatusText, setUpdateStatusText] = useState<string>('');
   const quickFileRef = useRef<HTMLInputElement | null>(null);
+
+  const checkForUpdates = useCallback(
+    async (interactive: boolean) => {
+      if (!isNativeAndroid) {
+        if (interactive) showToast('Las actualizaciones OTA automáticas corren en Android', 'info');
+        return;
+      }
+      setCheckingUpdate(true);
+      try {
+        const info = await RyotunesNativeMedia.checkGithubUpdate();
+        setUpdateInfo(info);
+        if (info.currentVersion) {
+          setAppVersionLabel(`v${info.currentVersion}`);
+        }
+        if (info.hasUpdate) {
+          setUpdateStatusText(`Nueva versión disponible: v${info.latestVersion}`);
+          setUpdateModalOpen(true);
+        } else {
+          const msg = `Ya tienes la última versión (v${info.currentVersion || '1.3.0-beta.1'})`;
+          setUpdateStatusText(msg);
+          if (interactive) showToast(msg, 'success');
+        }
+      } catch (err) {
+        if (interactive) {
+          showToast(
+            err instanceof Error ? err.message : 'No se pudo comprobar actualizaciones',
+            'error'
+          );
+        }
+      } finally {
+        setCheckingUpdate(false);
+      }
+    },
+    [isNativeAndroid, showToast]
+  );
+
+  useEffect(() => {
+    if (!isNativeAndroid) return;
+    RyotunesNativeMedia.getAppVersionInfo()
+      .then((info) => {
+        if (info?.versionName) setAppVersionLabel(`v${info.versionName}`);
+      })
+      .catch(() => {});
+    const timer = window.setTimeout(() => {
+      void checkForUpdates(false);
+    }, 2200);
+    return () => window.clearTimeout(timer);
+  }, [isNativeAndroid, checkForUpdates]);
 
   const navigateLibrary = (page: LibraryPageKind, param = '', tab: LibraryTab = 'songs') => {
     setLibParam(param);
@@ -43,6 +107,15 @@ const RyotunesShell: React.FC = () => {
       setExploreSubView('search');
       setActiveTab('explore');
     } else if (page === 'settings') {
+      if (
+        param === 'accounts' ||
+        param === 'appearance' ||
+        param === 'playback' ||
+        param === 'storage' ||
+        param === 'widget'
+      ) {
+        setSettingsTab(param);
+      }
       setActiveTab('studio');
     } else {
       setLibSubPage(page);
@@ -305,6 +378,11 @@ const RyotunesShell: React.FC = () => {
 
             {activeTab === 'studio' && (
               <SettingsPage
+                initialTab={settingsTab}
+                appVersionLabel={appVersionLabel}
+                checkingUpdate={checkingUpdate}
+                updateStatusText={updateStatusText}
+                onCheckUpdates={() => void checkForUpdates(true)}
                 onOpenLibrary={(page = 'home', param = '', tab = 'songs') => navigateLibrary(page, param, tab)}
                 onOpenSound={() => setSoundOpen(true)}
               />
@@ -335,6 +413,21 @@ const RyotunesShell: React.FC = () => {
       />
 
       <SoundDialog open={soundOpen} onClose={() => setSoundOpen(false)} />
+      <WelcomeModal
+        open={welcomeOpen}
+        onFinish={(openAccounts) => {
+          setWelcomeOpen(false);
+          if (openAccounts) {
+            setSettingsTab('accounts');
+            setActiveTab('studio');
+          }
+        }}
+      />
+      <UpdateBannerModal
+        open={updateModalOpen}
+        updateInfo={updateInfo}
+        onClose={() => setUpdateModalOpen(false)}
+      />
       <VolumeOsd />
       <Toast />
     </div>

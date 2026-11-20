@@ -1,6 +1,7 @@
 package dev.ryoku.ryotunes
 
 import android.Manifest
+import android.app.Activity
 import android.content.ComponentName
 import android.content.ContentUris
 import android.content.Context
@@ -17,12 +18,14 @@ import android.os.IBinder
 import android.os.Looper
 import android.provider.MediaStore
 import android.util.Size
+import androidx.activity.result.ActivityResult
 import com.getcapacitor.JSArray
 import com.getcapacitor.JSObject
 import com.getcapacitor.PermissionState
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
 import com.getcapacitor.PluginMethod
+import com.getcapacitor.annotation.ActivityCallback
 import com.getcapacitor.annotation.CapacitorPlugin
 import com.getcapacitor.annotation.Permission
 import com.getcapacitor.annotation.PermissionCallback
@@ -592,6 +595,130 @@ class RyotunesNativeMediaPlugin : Plugin(), RyotunesAudioService.ServiceListener
                 call.resolve(res)
             } catch (e: Throwable) {
                 call.reject("Lyrics fetch failed: ${e.message}")
+            }
+        }
+    }
+
+    // ── Multi-Provider Accounts & Cloud Playlist Sync ─────────────────────────
+
+    @PluginMethod
+    fun connectAccount(call: PluginCall) {
+        val rawProvider = call.getString("provider") ?: "ytmusic"
+        val provider = RyotunesAccountVault.normalizeProvider(rawProvider)
+        val intent = Intent(context, RyotunesAccountAuthActivity::class.java).apply {
+            putExtra(RyotunesAccountAuthActivity.EXTRA_PROVIDER, provider)
+        }
+        startActivityForResult(call, intent, "handleAccountAuthResult")
+    }
+
+    @ActivityCallback
+    private fun handleAccountAuthResult(call: PluginCall, result: ActivityResult) {
+        val data = result.data
+        val provider = data?.getStringExtra(RyotunesAccountAuthActivity.RESULT_PROVIDER)
+            ?: RyotunesAccountVault.normalizeProvider(call.getString("provider") ?: "ytmusic")
+        val connected = result.resultCode == Activity.RESULT_OK &&
+            (data?.getBooleanExtra(RyotunesAccountAuthActivity.RESULT_CONNECTED, false) == true)
+        val accountName = data?.getStringExtra(RyotunesAccountAuthActivity.RESULT_ACCOUNT_NAME) ?: ""
+        call.resolve(JSObject().apply {
+            put("connected", connected)
+            put("provider", provider)
+            put("accountName", accountName)
+        })
+    }
+
+    @PluginMethod
+    fun disconnectAccount(call: PluginCall) {
+        val rawProvider = call.getString("provider") ?: ""
+        val provider = RyotunesAccountVault.normalizeProvider(rawProvider)
+        if (provider.isBlank()) {
+            call.reject("Missing provider")
+            return
+        }
+        RyotunesAccountVault.disconnect(context, provider)
+        call.resolve(JSObject().apply {
+            put("connected", false)
+            put("provider", provider)
+        })
+    }
+
+    @PluginMethod
+    fun getConnectedAccounts(call: PluginCall) {
+        call.resolve(RyotunesAccountVault.getConnectedAccountsJson(context))
+    }
+
+    @PluginMethod
+    fun syncAccountPlaylists(call: PluginCall) {
+        val rawProvider = call.getString("provider") ?: ""
+        val provider = RyotunesAccountVault.normalizeProvider(rawProvider)
+        if (provider.isBlank()) {
+            call.reject("Missing provider")
+            return
+        }
+        ioExecutor.execute {
+            try {
+                val res = RyotunesAccountSync.syncAccountPlaylists(context, provider)
+                call.resolve(res)
+            } catch (e: Throwable) {
+                call.reject(e.localizedMessage ?: "No se pudieron sincronizar las playlists")
+            }
+        }
+    }
+
+    @PluginMethod
+    fun importPlaylistByUrl(call: PluginCall) {
+        val url = call.getString("url") ?: ""
+        if (url.isBlank()) {
+            call.reject("Pega un enlace de playlist válido")
+            return
+        }
+        ioExecutor.execute {
+            try {
+                val res = RyotunesAccountSync.importPlaylistByUrl(context, url)
+                call.resolve(res)
+            } catch (e: Throwable) {
+                call.reject(e.localizedMessage ?: "No se pudo importar la playlist")
+            }
+        }
+    }
+
+    // ── GitHub Releases OTA Auto-Updater ──────────────────────────────────────
+
+    @PluginMethod
+    fun getAppVersionInfo(call: PluginCall) {
+        call.resolve(RyotunesUpdater.getAppVersionInfo())
+    }
+
+    @PluginMethod
+    fun checkGithubUpdate(call: PluginCall) {
+        ioExecutor.execute {
+            try {
+                val res = RyotunesUpdater.checkGithubUpdate()
+                call.resolve(res)
+            } catch (e: Throwable) {
+                call.reject(e.localizedMessage ?: "No se pudo consultar actualizaciones")
+            }
+        }
+    }
+
+    @PluginMethod
+    fun downloadAndInstallUpdate(call: PluginCall) {
+        val apkUrl = call.getString("apkUrl") ?: ""
+        val version = call.getString("version") ?: ""
+        if (apkUrl.isBlank()) {
+            call.reject("Missing apkUrl")
+            return
+        }
+        ioExecutor.execute {
+            try {
+                val res = RyotunesUpdater.downloadAndInstallUpdate(context, apkUrl) { pct ->
+                    notifyListeners("updateProgress", JSObject().apply {
+                        put("progress", pct)
+                        put("version", version)
+                    })
+                }
+                call.resolve(res)
+            } catch (e: Throwable) {
+                call.reject(e.localizedMessage ?: "Error al descargar la actualización")
             }
         }
     }

@@ -1,19 +1,74 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useAudio } from '../audio/AudioContextProvider';
-import { AudioQuality, LibraryPage, LibraryTab } from '../audio/types';
+import { AccountProviderId, AudioQuality, LibraryPage, LibraryTab } from '../audio/types';
 import { DesktopWidgetCard } from '../components/DesktopWidgetCard';
 import { Icon } from '../icons/Icon';
 import { PROVIDER_COLORS } from '../theme/skins';
 import { useTheme } from '../theme/ThemeContext';
 
+export type SettingsTab = 'accounts' | 'appearance' | 'playback' | 'storage' | 'widget';
+
 interface SettingsPageProps {
+  initialTab?: SettingsTab;
+  appVersionLabel?: string;
+  checkingUpdate?: boolean;
+  updateStatusText?: string;
+  onCheckUpdates?: () => void;
   onOpenLibrary: (page?: LibraryPage, param?: string, tab?: LibraryTab) => void;
   onOpenSound: () => void;
 }
 
-type SettingsTab = 'appearance' | 'playback' | 'storage' | 'widget';
+const ACCOUNT_PROVIDERS: Array<{
+  id: AccountProviderId;
+  name: string;
+  kanji: string;
+  icon: string;
+  color: string;
+  hint: string;
+}> = [
+  {
+    id: 'ytmusic',
+    name: 'YouTube Music',
+    kanji: '鍵',
+    icon: 'youtube-music',
+    color: PROVIDER_COLORS.youtube,
+    hint: 'Sincroniza playlists guardadas y Me Gusta de tu cuenta Google.',
+  },
+  {
+    id: 'spotify',
+    name: 'Spotify',
+    kanji: '緑',
+    icon: 'spotify',
+    color: PROVIDER_COLORS.spotify,
+    hint: 'Sincroniza tus playlists y Tus Me Gusta de Spotify.',
+  },
+  {
+    id: 'soundcloud',
+    name: 'SoundCloud',
+    kanji: '雲',
+    icon: 'soundcloud',
+    color: PROVIDER_COLORS.soundcloud,
+    hint: 'Importa tus sets, playlists y likes de SoundCloud.',
+  },
+  {
+    id: 'tidal',
+    name: 'TIDAL',
+    kanji: '潮',
+    icon: 'tidal',
+    color: PROVIDER_COLORS.tidal,
+    hint: 'Sincroniza playlists Hi-Res y favoritos de TIDAL.',
+  },
+];
 
-export const SettingsPage: React.FC<SettingsPageProps> = ({ onOpenLibrary, onOpenSound }) => {
+export const SettingsPage: React.FC<SettingsPageProps> = ({
+  initialTab,
+  appVersionLabel = 'v1.3.0-beta.1',
+  checkingUpdate = false,
+  updateStatusText,
+  onCheckUpdates,
+  onOpenLibrary,
+  onOpenSound,
+}) => {
   const {
     skinId,
     setSkinId,
@@ -56,9 +111,21 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ onOpenLibrary, onOpe
     clearOfflineAndCache,
     syncDeviceLibrary,
     isNativeAndroid,
+    accounts,
+    syncingAccount,
+    importingPlaylistUrl,
+    connectAccount,
+    disconnectAccount,
+    syncAccount,
+    importPlaylistUrl,
   } = useAudio();
 
-  const [section, setSection] = useState<SettingsTab>('appearance');
+  const [section, setSection] = useState<SettingsTab>(initialTab || 'accounts');
+  const [playlistUrlInput, setPlaylistUrlInput] = useState('');
+
+  useEffect(() => {
+    if (initialTab) setSection(initialTab);
+  }, [initialTab]);
 
   const totalOfflineMb = (
     offlineTracks.reduce((acc, t) => acc + (t.offlineSizeBytes || 0), 0) /
@@ -171,6 +238,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ onOpenLibrary, onOpe
       <div style={{ display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 2 }}>
         {(
           [
+            { k: 'accounts', l: 'Accounts · 鍵' },
             { k: 'appearance', l: 'Appearance · 表示' },
             { k: 'playback', l: 'Sound & Engine · 音響' },
             { k: 'storage', l: 'Providers & Offline · 保存' },
@@ -180,6 +248,220 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ onOpenLibrary, onOpe
           <ChipButton key={t.k} label={t.l} active={section === t.k} onClick={() => setSection(t.k)} />
         ))}
       </div>
+
+      {/* ── SECTION 0: ACCOUNTS // CLOUD SYNC & PLAYLIST URL IMPORT ──────────── */}
+      {section === 'accounts' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <SectionHead title="ACCOUNTS // CLOUD SYNC" mark="鍵" />
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))', gap: 10 }}>
+            {ACCOUNT_PROVIDERS.map((prov) => {
+              const st = accounts[prov.id];
+              const connected = Boolean(st?.connected);
+              const isSyncing = syncingAccount === prov.id;
+              return (
+                <div
+                  key={prov.id}
+                  style={{
+                    padding: 14,
+                    borderRadius: 'var(--radius-card)',
+                    backgroundColor: 'var(--paper-lift)',
+                    border: `1.5px solid ${connected ? prov.color : 'var(--line-soft)'}`,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 10,
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                      <Icon name={prov.icon} size={19} color={prov.color} />
+                      <span
+                        style={{
+                          fontSize: 14.5,
+                          fontWeight: 600,
+                          color: 'var(--ink)',
+                          whiteSpace: 'nowrap',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                        }}
+                      >
+                        {prov.name}
+                      </span>
+                      {decor === 'rich' && (
+                        <span style={{ fontSize: 11, color: 'var(--ink-faint)' }}>{prov.kanji}</span>
+                      )}
+                    </div>
+
+                    <span
+                      className="font-mono-tech"
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 5,
+                        padding: '3px 8px',
+                        borderRadius: 999,
+                        fontSize: 9.5,
+                        fontWeight: 700,
+                        backgroundColor: connected ? 'rgba(74, 222, 128, 0.14)' : 'var(--paper)',
+                        border: `1px solid ${connected ? '#4ADE80' : 'var(--line)'}`,
+                        color: connected ? '#4ADE80' : 'var(--ink-faint)',
+                        flexShrink: 0,
+                      }}
+                    >
+                      <span
+                        style={{
+                          width: 6,
+                          height: 6,
+                          borderRadius: 999,
+                          backgroundColor: connected ? '#4ADE80' : 'var(--ink-faint)',
+                        }}
+                      />
+                      {connected ? 'CONNECTED' : 'OFFLINE'}
+                    </span>
+                  </div>
+
+                  <div style={{ fontSize: 12, color: 'var(--ink-muted)', lineHeight: 1.4 }}>
+                    {connected && st?.accountName ? `Sesión activa: ${st.accountName}` : prov.hint}
+                  </div>
+
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 2 }}>
+                    {!connected ? (
+                      <button
+                        type="button"
+                        onClick={() => void connectAccount(prov.id)}
+                        className="font-mono-tech ryo-pressable"
+                        style={{
+                          height: 32,
+                          padding: '0 14px',
+                          borderRadius: 999,
+                          backgroundColor: prov.color,
+                          color: '#FFFFFF',
+                          border: 'none',
+                          fontSize: 11,
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        CONECTAR
+                      </button>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          disabled={isSyncing}
+                          onClick={async () => {
+                            const r = await syncAccount(prov.id);
+                            if (r.playlistCount > 0) {
+                              onOpenLibrary('library', '', 'playlists');
+                            }
+                          }}
+                          className="font-mono-tech ryo-pressable"
+                          style={{
+                            height: 32,
+                            padding: '0 14px',
+                            borderRadius: 999,
+                            backgroundColor: 'var(--bone)',
+                            color: 'var(--ink-on-bone)',
+                            border: 'none',
+                            fontSize: 11,
+                            fontWeight: 700,
+                            opacity: isSyncing ? 0.65 : 1,
+                            cursor: isSyncing ? 'wait' : 'pointer',
+                          }}
+                        >
+                          {isSyncing ? 'SINCRONIZANDO…' : 'SINCRONIZAR'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isSyncing}
+                          onClick={() => void disconnectAccount(prov.id)}
+                          className="font-mono-tech ryo-pressable"
+                          style={{
+                            height: 32,
+                            padding: '0 12px',
+                            borderRadius: 999,
+                            backgroundColor: 'transparent',
+                            color: 'var(--ink-muted)',
+                            border: '1px solid var(--line)',
+                            fontSize: 10.5,
+                            fontWeight: 600,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          DESCONECTAR
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <SectionHead title="IMPORTAR PLAYLIST POR ENLACE" mark="経" />
+
+          <div
+            style={{
+              padding: 14,
+              borderRadius: 'var(--radius-card)',
+              backgroundColor: 'var(--paper-lift)',
+              border: '1px solid var(--line-soft)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 10,
+            }}
+          >
+            <div style={{ fontSize: 12.5, color: 'var(--ink-muted)', lineHeight: 1.45 }}>
+              Pega cualquier enlace público de playlist de YouTube Music, Spotify, SoundCloud o TIDAL para añadirla al instante a tu biblioteca y poder descargarla offline.
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <input
+                type="url"
+                value={playlistUrlInput}
+                onChange={(e) => setPlaylistUrlInput(e.target.value)}
+                placeholder="https://music.youtube.com/playlist?list=... o open.spotify.com/playlist/..."
+                style={{
+                  flex: '1 1 220px',
+                  height: 38,
+                  borderRadius: 'var(--radius)',
+                  backgroundColor: 'var(--paper)',
+                  border: '1px solid var(--line)',
+                  color: 'var(--ink)',
+                  padding: '0 12px',
+                  fontSize: 13,
+                  outline: 'none',
+                }}
+              />
+              <button
+                type="button"
+                disabled={importingPlaylistUrl || !playlistUrlInput.trim()}
+                onClick={async () => {
+                  const imported = await importPlaylistUrl(playlistUrlInput);
+                  if (imported) {
+                    setPlaylistUrlInput('');
+                    onOpenLibrary('playlist', imported.id);
+                  }
+                }}
+                className="font-mono-tech ryo-pressable"
+                style={{
+                  height: 38,
+                  padding: '0 16px',
+                  borderRadius: 999,
+                  backgroundColor: 'var(--accent)',
+                  color: '#FFFFFF',
+                  border: 'none',
+                  fontSize: 11.5,
+                  fontWeight: 700,
+                  opacity: importingPlaylistUrl || !playlistUrlInput.trim() ? 0.5 : 1,
+                  cursor: importingPlaylistUrl ? 'wait' : 'pointer',
+                }}
+              >
+                {importingPlaylistUrl ? 'IMPORTANDO…' : 'IMPORTAR'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── SECTION 1: APPEARANCE (11 Skins + Bento Inheritance + Surfaces) ──── */}
       {section === 'appearance' && (
@@ -741,6 +1023,77 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ onOpenLibrary, onOpe
           <DesktopWidgetCard onOpenLibrary={() => onOpenLibrary('home')} />
         </div>
       )}
+
+      {/* ── SYSTEM // OTA UPDATES (GitHub Releases) ───────────────────────────── */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 4 }}>
+        <SectionHead title="SYSTEM // OTA UPDATES" mark="更" />
+        <div
+          style={{
+            padding: 14,
+            borderRadius: 'var(--radius-card)',
+            backgroundColor: 'var(--paper-lift)',
+            border: '1px solid var(--line-soft)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 12,
+            flexWrap: 'wrap',
+          }}
+        >
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span className="font-ndot" style={{ fontSize: 13, color: 'var(--ink)', letterSpacing: 1 }}>
+                RYOTUNES MOBILE
+              </span>
+              <span
+                className="font-mono-tech"
+                style={{
+                  padding: '2px 8px',
+                  borderRadius: 999,
+                  backgroundColor: 'var(--accent-soft)',
+                  border: '1px solid var(--accent)',
+                  color: 'var(--accent)',
+                  fontSize: 10,
+                  fontWeight: 700,
+                }}
+              >
+                {appVersionLabel}
+              </span>
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--ink-muted)' }}>
+              {updateStatusText || 'Actualizaciones automáticas firmadas desde GitHub Releases.'}
+            </div>
+          </div>
+
+          {onCheckUpdates && (
+            <button
+              type="button"
+              disabled={checkingUpdate}
+              onClick={onCheckUpdates}
+              className="font-mono-tech ryo-pressable"
+              style={{
+                height: 36,
+                padding: '0 16px',
+                borderRadius: 999,
+                backgroundColor: 'var(--bone)',
+                color: 'var(--ink-on-bone)',
+                border: 'none',
+                fontSize: 11,
+                fontWeight: 700,
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                opacity: checkingUpdate ? 0.6 : 1,
+                cursor: checkingUpdate ? 'wait' : 'pointer',
+                flexShrink: 0,
+              }}
+            >
+              <Icon name="download" size={14} color="var(--ink-on-bone)" />
+              <span>{checkingUpdate ? 'BUSCANDO…' : 'BUSCAR ACTUALIZACIONES'}</span>
+            </button>
+          )}
+        </div>
+      </div>
     </div>
   );
 };

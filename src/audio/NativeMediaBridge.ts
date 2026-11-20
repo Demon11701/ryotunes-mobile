@@ -1,5 +1,16 @@
 import { Capacitor, PluginListenerHandle, registerPlugin } from '@capacitor/core';
-import { AudioFxState, AudioQuality, ProviderId, RepeatMode, Track } from './types';
+import {
+  AccountProviderId,
+  AccountsMap,
+  AppVersionInfo,
+  AudioFxState,
+  AudioQuality,
+  GithubUpdateInfo,
+  Playlist,
+  ProviderId,
+  RepeatMode,
+  Track,
+} from './types';
 
 export interface PermissionsStatus {
   audioGranted: boolean;
@@ -84,6 +95,47 @@ export interface NativeSpectrumEvent {
   bands: number[];
 }
 
+export interface NativeAccountConnectResult {
+  connected: boolean;
+  provider: AccountProviderId;
+  accountName: string;
+}
+
+export interface NativeSyncedTrackItem {
+  id: string;
+  provider: ProviderId;
+  remoteId?: string;
+  title: string;
+  artist: string;
+  album: string;
+  duration: number;
+  artwork?: string;
+  format?: string;
+}
+
+export interface NativeAccountSyncResult {
+  provider: AccountProviderId;
+  accountName: string;
+  playlists: Playlist[];
+  tracks: NativeSyncedTrackItem[];
+  likedIds: string[];
+}
+
+export interface NativeImportPlaylistResult {
+  playlist: Playlist;
+  tracks: NativeSyncedTrackItem[];
+}
+
+export interface NativeUpdateProgressEvent {
+  progress: number;
+  version?: string;
+}
+
+export interface NativeDownloadUpdateResult {
+  started: boolean;
+  needsPermission?: boolean;
+}
+
 export interface RyotunesNativeMediaPluginInterface {
   checkPermissionsStatus(): Promise<PermissionsStatus>;
   requestAudioPermissions(): Promise<PermissionsStatus>;
@@ -120,6 +172,17 @@ export interface RyotunesNativeMediaPluginInterface {
     album?: string;
     durationSec?: number;
   }): Promise<{ syncedLyrics?: string; plainLyrics?: string; source?: string }>;
+  connectAccount(options: { provider: AccountProviderId }): Promise<NativeAccountConnectResult>;
+  disconnectAccount(options: { provider: AccountProviderId }): Promise<{ connected: boolean; provider: AccountProviderId }>;
+  getConnectedAccounts(): Promise<AccountsMap>;
+  syncAccountPlaylists(options: { provider: AccountProviderId }): Promise<NativeAccountSyncResult>;
+  importPlaylistByUrl(options: { url: string }): Promise<NativeImportPlaylistResult>;
+  getAppVersionInfo(): Promise<AppVersionInfo>;
+  checkGithubUpdate(): Promise<GithubUpdateInfo>;
+  downloadAndInstallUpdate(options: {
+    apkUrl: string;
+    version?: string;
+  }): Promise<NativeDownloadUpdateResult>;
   setQueue(options: { tracks: unknown[]; startIndex: number; autoPlay: boolean; startPosition?: number }): Promise<void>;
   play(): Promise<void>;
   pause(): Promise<void>;
@@ -149,6 +212,10 @@ export interface RyotunesNativeMediaPluginInterface {
   addListener(
     eventName: 'downloadProgress',
     listenerFunc: (event: NativeDownloadProgressEvent) => void
+  ): Promise<PluginListenerHandle>;
+  addListener(
+    eventName: 'updateProgress',
+    listenerFunc: (event: NativeUpdateProgressEvent) => void
   ): Promise<PluginListenerHandle>;
 }
 

@@ -414,7 +414,7 @@ object RyotunesOnlineResolver {
         return list
     }
 
-    private fun getSoundCloudClientId(): String {
+    internal fun getSoundCloudClientId(): String {
         val now = System.currentTimeMillis()
         if (cachedScClientId.isNotEmpty() && now - cachedScAtMs < 3_600_000L) {
             return cachedScClientId
