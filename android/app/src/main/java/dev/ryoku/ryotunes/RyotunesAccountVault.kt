@@ -92,6 +92,21 @@ object RyotunesAccountVault {
         prefs.edit().putString("${p}_name", accountName.trim()).apply()
     }
 
+    fun saveScrapedLibraryJson(context: Context, rawProvider: String, json: String) {
+        val p = normalizeProvider(rawProvider)
+        if (json.isBlank()) return
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString("${p}_scraped_lib", json)
+            .apply()
+    }
+
+    fun getScrapedLibraryJson(context: Context, rawProvider: String): String {
+        val p = normalizeProvider(rawProvider)
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString("${p}_scraped_lib", "") ?: ""
+    }
+
     fun getSession(context: Context, rawProvider: String): AccountSession? {
         val p = normalizeProvider(rawProvider)
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -116,6 +131,7 @@ object RyotunesAccountVault {
             remove("${p}_access_token")
             remove("${p}_client_token")
             remove("${p}_token_at")
+            remove("${p}_scraped_lib")
             remove("${p}_name")
             remove("${p}_at")
             apply()

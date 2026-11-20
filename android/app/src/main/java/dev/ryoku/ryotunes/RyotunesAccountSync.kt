@@ -546,6 +546,29 @@ object RyotunesAccountSync {
 
                 wv.addJavascriptInterface(object {
                     @JavascriptInterface
+                    fun onCapturedHeaders(bearer: String?, clientToken: String?) {
+                        onCaptured(bearer?.trim().orEmpty(), clientToken?.trim().orEmpty())
+                    }
+
+                    @JavascriptInterface
+                    fun onCapturedTokenJson(token: String?, isAnonymous: Boolean) {
+                        if (!isAnonymous) {
+                            onCaptured(token?.trim().orEmpty(), "")
+                        }
+                    }
+
+                    @JavascriptInterface
+                    fun onScrapedLibrary(json: String?) {
+                        val raw = json?.trim().orEmpty()
+                        if (raw.isNotBlank()) {
+                            domPlaylistsRef.set(raw)
+                            RyotunesAccountVault.saveScrapedLibraryJson(context, "spotify", raw)
+                        }
+                    }
+                }, "RyotunesAuthBridge")
+
+                wv.addJavascriptInterface(object {
+                    @JavascriptInterface
                     fun onToken(accessToken: String?, clientToken: String?) {
                         onCaptured(accessToken?.trim().orEmpty(), clientToken?.trim().orEmpty())
                     }
@@ -554,7 +577,7 @@ object RyotunesAccountSync {
                     fun onExtracted(plJson: String?, likedJson: String?, domJson: String?) {
                         if (!plJson.isNullOrBlank()) playlistsJsonRef.set(plJson)
                         if (!likedJson.isNullOrBlank()) likedJsonRef.set(likedJson)
-                        if (!domJson.isNullOrBlank()) domPlaylistsRef.set(domJson)
+                        if (!domJson.isNullOrBlank() && domJson != "[]") domPlaylistsRef.set(domJson)
                         finishOnce()
                     }
 
@@ -565,6 +588,8 @@ object RyotunesAccountSync {
                     }
                 }, "RyotunesTokenBridge")
 
+                RyotunesAccountAuthActivity.installSpotifyDocumentStartHook(wv)
+
                 wv.webViewClient = object : WebViewClient() {
                     override fun shouldInterceptRequest(
                         view: WebView?,
@@ -573,18 +598,15 @@ object RyotunesAccountSync {
                         if (request != null) {
                             val host = request.url?.host?.lowercase().orEmpty()
                             val hdrs = request.requestHeaders
-                            if (hdrs != null &&
-                                (host.contains("api.spotify.com") ||
-                                    host.contains("api-partner.spotify.com") ||
-                                    host.contains("spclient.wg.spotify.com"))
-                            ) {
+                            if (hdrs != null && (host == "spotify.com" || host.endsWith(".spotify.com"))) {
                                 var tok = ""
                                 var ct = ""
-                                for ((k, v) in hdrs) {
-                                    val kl = k.lowercase()
-                                    if (kl == "authorization" && v.startsWith("Bearer ", ignoreCase = true)) {
+                                for ((k, v) in hdrs.entries) {
+                                    if (k.equals("authorization", ignoreCase = true) &&
+                                        v.startsWith("Bearer ", ignoreCase = true)
+                                    ) {
                                         tok = v.substring(7).trim()
-                                    } else if (kl == "client-token") {
+                                    } else if (k.equals("client-token", ignoreCase = true)) {
                                         ct = v.trim()
                                     }
                                 }
@@ -599,14 +621,14 @@ object RyotunesAccountSync {
                     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                         super.onPageStarted(view, url, favicon)
                         if (url != null && url.contains("open.spotify.com", ignoreCase = true)) {
-                            view?.evaluateJavascript(RyotunesAccountAuthActivity.SPOTIFY_TOKEN_HOOK_JS, null)
+                            view?.evaluateJavascript(RyotunesAccountAuthActivity.SPOTIFY_DOCUMENT_START_HOOK_JS, null)
                         }
                     }
 
                     override fun onPageFinished(view: WebView?, url: String?) {
                         super.onPageFinished(view, url)
                         if (url != null && url.contains("open.spotify.com", ignoreCase = true)) {
-                            view?.evaluateJavascript(RyotunesAccountAuthActivity.SPOTIFY_TOKEN_HOOK_JS, null)
+                            view?.evaluateJavascript(RyotunesAccountAuthActivity.SPOTIFY_DOCUMENT_START_HOOK_JS, null)
                             if (extractPlaylists) {
                                 mainHandler.postDelayed({
                                     if (!released && !fetchTriggered) {
@@ -799,6 +821,39 @@ object RyotunesAccountSync {
         }
     }
 
+    private fun mergeScrapedSpotifyLibrary(
+        rawJson: String,
+        playlistsArr: JSArray,
+        seenPlaylistIds: HashSet<String>
+    ) {
+        if (rawJson.isBlank()) return
+        val arr = runCatching {
+            val trimmed = rawJson.trim()
+            if (trimmed.startsWith("[")) {
+                JSONArray(trimmed)
+            } else {
+                JSONObject(trimmed).optJSONArray("playlists") ?: JSONArray()
+            }
+        }.getOrNull() ?: return
+
+        for (i in 0 until arr.length()) {
+            val item = arr.optJSONObject(i) ?: continue
+            val pid = item.optString("id", "").trim()
+            val pname = item.optString("name", "").trim()
+            val pimg = item.optString("image", "").trim()
+            if (pid.isBlank() || pname.isBlank() || !seenPlaylistIds.add(pid)) continue
+            playlistsArr.put(JSObject().apply {
+                put("id", "PL:spotify:$pid")
+                put("title", pname)
+                put("subtitle", "Toca para cargar · Spotify")
+                put("provider", "spotify")
+                put("artwork", pimg)
+                put("trackIds", JSArray())
+                put("createdAt", System.currentTimeMillis() - i)
+            })
+        }
+    }
+
     private fun syncSpotify(
         context: Context,
         session: RyotunesAccountVault.AccountSession
@@ -860,26 +915,16 @@ object RyotunesAccountSync {
                         hydrateTracks = headless.accessToken.isNotBlank()
                     )
                 }
-                if (playlistsArr.length() == 0 && headless.domPlaylistsJson.isNotBlank()) {
-                    val domArr = runCatching { JSONArray(headless.domPlaylistsJson) }.getOrNull() ?: JSONArray()
-                    for (i in 0 until domArr.length()) {
-                        val item = domArr.optJSONObject(i) ?: continue
-                        val pid = item.optString("id", "")
-                        val pname = item.optString("name", "")
-                        val pimg = item.optString("image", "")
-                        if (pid.isBlank() || pname.isBlank() || !seenPlaylistIds.add(pid)) continue
-                        playlistsArr.put(JSObject().apply {
-                            put("id", "PL:spotify:$pid")
-                            put("title", pname)
-                            put("subtitle", "Toca para cargar · Spotify")
-                            put("provider", "spotify")
-                            put("artwork", pimg)
-                            put("trackIds", JSArray())
-                            put("createdAt", System.currentTimeMillis() - i)
-                        })
-                    }
+                if (headless.domPlaylistsJson.isNotBlank()) {
+                    mergeScrapedSpotifyLibrary(headless.domPlaylistsJson, playlistsArr, seenPlaylistIds)
                 }
             }
+        }
+
+        // ── Merge cached DOM / Pathfinder playlists captured during login ─────
+        val cachedScraped = RyotunesAccountVault.getScrapedLibraryJson(context, "spotify")
+        if (cachedScraped.isNotBlank()) {
+            mergeScrapedSpotifyLibrary(cachedScraped, playlistsArr, seenPlaylistIds)
         }
 
         // ── Real Diagnostics (never mask 401/403/DRM errors) ──────────────────
