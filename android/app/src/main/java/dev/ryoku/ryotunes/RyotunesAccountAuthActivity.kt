@@ -2,6 +2,7 @@ package dev.ryoku.ryotunes
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -29,6 +30,8 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.res.ResourcesCompat
+import androidx.webkit.WebSettingsCompat
+import androidx.webkit.WebViewFeature
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -38,9 +41,10 @@ import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Native WebView login screen for YouTube Music, Spotify, SoundCloud, and TIDAL.
- * For Spotify: grants Widevine DRM (RESOURCE_PROTECTED_MEDIA_ID), uses Desktop Chrome UA
- * so open.spotify.com boots the real Web Player, captures Bearer + client-token only after
- * sp_dc is present, and verifies HTTP 200 OK against /v1/me before closing.
+ * - Strips X-Requested-With header via AndroidX WebKit to avoid Google OAuth WebView blocks.
+ * - Uses device-coherent dynamic Chrome Mobile UA on login domains (Google / accounts.spotify.com)
+ *   and switches dynamically to matching-version Linux Desktop Chrome UA on open.spotify.com.
+ * - Grants Widevine DRM (RESOURCE_PROTECTED_MEDIA_ID) and verifies HTTP 200 OK against /v1/me.
  */
 class RyotunesAccountAuthActivity : AppCompatActivity() {
 
@@ -50,11 +54,38 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
         const val RESULT_PROVIDER = "provider"
         const val RESULT_ACCOUNT_NAME = "accountName"
 
-        internal const val CLEAN_CHROME_UA =
-            "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Mobile Safari/537.36"
+        private const val FALLBACK_MOBILE_UA =
+            "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
-        internal const val SPOTIFY_DESKTOP_CHROME_UA =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        internal fun buildCleanMobileUa(context: Context): String {
+            val defaultUa = runCatching { WebSettings.getDefaultUserAgent(context) }
+                .getOrDefault(FALLBACK_MOBILE_UA)
+            return defaultUa
+                .replace(Regex(";\\s*wv\\b", RegexOption.IGNORE_CASE), "")
+                .replace(Regex("\\bVersion/\\d+(?:\\.\\d+)*\\s*"), "")
+                .replace(Regex("\\s{2,}"), " ")
+                .trim()
+        }
+
+        internal fun buildCleanDesktopUa(context: Context): String {
+            val defaultUa = runCatching { WebSettings.getDefaultUserAgent(context) }
+                .getOrDefault(FALLBACK_MOBILE_UA)
+            val realChromeVersion = Regex("Chrome/(\\d+(?:\\.\\d+)*)")
+                .find(defaultUa)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.ifBlank { "131.0.0.0" }
+                ?: "131.0.0.0"
+            return "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$realChromeVersion Safari/537.36"
+        }
+
+        internal fun suppressRequestedWithHeader(settings: WebSettings) {
+            runCatching {
+                if (WebViewFeature.isFeatureSupported(WebViewFeature.REQUESTED_WITH_HEADER_ALLOW_LIST)) {
+                    WebSettingsCompat.setRequestedWithHeaderOriginAllowList(settings, emptySet())
+                }
+            }
+        }
 
         internal val SPOTIFY_TOKEN_HOOK_JS: String = """
             (function() {
@@ -148,6 +179,9 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private lateinit var progressBar: ProgressBar
     private lateinit var titleTv: TextView
+    private lateinit var cleanMobileUa: String
+    private lateinit var cleanDesktopUa: String
+    private var desktopUaApplied = false
     private val mainHandler = Handler(Looper.getMainLooper())
     private val verifyExecutor = Executors.newSingleThreadExecutor()
     private val capturedAccessToken = AtomicReference("")
@@ -164,7 +198,6 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
             val ct = clientToken?.trim().orEmpty()
 
             if (provider == "spotify") {
-                // Never accept a Spotify token before sp_dc cookie exists (avoids anonymous visitor tokens)
                 val (_, spDc) = readSpotifyCookies(CookieManager.getInstance())
                 if (spDc.isBlank()) return
             }
@@ -201,6 +234,9 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
 
         provider = RyotunesAccountVault.normalizeProvider(intent.getStringExtra(EXTRA_PROVIDER) ?: "ytmusic")
+        cleanMobileUa = buildCleanMobileUa(this)
+        cleanDesktopUa = buildCleanDesktopUa(this)
+
         val ndot = try {
             ResourcesCompat.getFont(this, R.font.ndot57) ?: Typeface.MONOSPACE
         } catch (_: Throwable) {
@@ -296,6 +332,22 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
 
         root.addView(topBar)
 
+        // Compact obsidian/lavender tip banner for Spotify login fallback
+        if (provider == "spotify") {
+            val tipBanner = TextView(this).apply {
+                text = "Tip: Si Google te bloquea, escribe tu correo directo en Spotify y entra con código de 6 dígitos."
+                setBackgroundColor(Color.parseColor("#191326"))
+                setTextColor(Color.parseColor("#C4B5FD"))
+                textSize = 11f
+                setPadding(dpPx(14), dpPx(6), dpPx(14), dpPx(7))
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            }
+            root.addView(tipBanner)
+        }
+
         progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             max = 100
             progress = 15
@@ -315,7 +367,9 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
                 useWideViewPort = true
                 loadWithOverviewMode = true
                 mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                userAgentString = if (provider == "spotify") SPOTIFY_DESKTOP_CHROME_UA else CLEAN_CHROME_UA
+                // Start with coherent device Chrome Mobile UA (safe for Google OAuth / YT Music / accounts.spotify.com)
+                userAgentString = cleanMobileUa
+                suppressRequestedWithHeader(this)
             }
             addJavascriptInterface(TokenCaptureBridge(), "RyotunesTokenBridge")
         }
@@ -340,9 +394,29 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
 
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                val scheme = request?.url?.scheme?.lowercase() ?: return false
+                val uri = request?.url ?: return false
+                val scheme = uri.scheme?.lowercase() ?: return false
                 // Keep http/https inside WebView instead of bouncing out to native Spotify/YT apps
-                return scheme != "http" && scheme != "https"
+                if (scheme != "http" && scheme != "https") return true
+
+                if (provider == "spotify" && view != null) {
+                    val host = uri.host?.lowercase().orEmpty()
+                    val urlStr = uri.toString()
+                    if (host == "open.spotify.com" && !desktopUaApplied) {
+                        desktopUaApplied = true
+                        view.settings.userAgentString = cleanDesktopUa
+                        view.loadUrl(urlStr)
+                        return true
+                    } else if ((host.contains("accounts.spotify.com") || host.contains("accounts.google.com")) &&
+                        desktopUaApplied
+                    ) {
+                        desktopUaApplied = false
+                        view.settings.userAgentString = cleanMobileUa
+                        view.loadUrl(urlStr)
+                        return true
+                    }
+                }
+                return false
             }
 
             override fun shouldInterceptRequest(
@@ -395,18 +469,27 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
-                if (!completed && provider == "spotify" && url != null &&
-                    url.contains("open.spotify.com", ignoreCase = true)
-                ) {
-                    titleTv.text = "● VERIFICANDO SESIÓN // SPOTIFY…"
-                    view?.evaluateJavascript(SPOTIFY_TOKEN_HOOK_JS, null)
+                if (!completed && provider == "spotify" && url != null && view != null) {
+                    val isOpenSpotify = url.contains("://open.spotify.com", ignoreCase = true)
+                    if (isOpenSpotify && !desktopUaApplied) {
+                        // Catch server-side 302 redirects from accounts.spotify.com -> open.spotify.com
+                        desktopUaApplied = true
+                        view.stopLoading()
+                        view.settings.userAgentString = cleanDesktopUa
+                        view.loadUrl(url)
+                        return
+                    }
+                    if (isOpenSpotify) {
+                        titleTv.text = "● VERIFICANDO SESIÓN // SPOTIFY…"
+                        view.evaluateJavascript(SPOTIFY_TOKEN_HOOK_JS, null)
+                    }
                 }
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 if (!completed && url != null) {
-                    if (provider == "spotify" && url.contains("open.spotify.com", ignoreCase = true)) {
+                    if (provider == "spotify" && url.contains("://open.spotify.com", ignoreCase = true)) {
                         titleTv.text = "● VERIFICANDO SESIÓN // SPOTIFY…"
                         view?.evaluateJavascript(SPOTIFY_TOKEN_HOOK_JS, null)
                         mainHandler.postDelayed({
@@ -424,7 +507,7 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
                 super.doUpdateVisitedHistory(view, url, isReload)
                 if (!completed && url != null) {
-                    if (provider == "spotify" && url.contains("open.spotify.com", ignoreCase = true)) {
+                    if (provider == "spotify" && url.contains("://open.spotify.com", ignoreCase = true)) {
                         view?.evaluateJavascript(SPOTIFY_TOKEN_HOOK_JS, null)
                         scheduleSpotifyCheck()
                     } else {
@@ -475,7 +558,7 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
                     connectTimeout = 7500
                     readTimeout = 7500
                     setRequestProperty("Authorization", "Bearer $accessTok")
-                    setRequestProperty("User-Agent", SPOTIFY_DESKTOP_CHROME_UA)
+                    setRequestProperty("User-Agent", cleanDesktopUa)
                     setRequestProperty("Origin", "https://open.spotify.com")
                     setRequestProperty("Referer", "https://open.spotify.com/")
                     setRequestProperty("Accept", "application/json")
@@ -510,7 +593,6 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
                         }
                     }
                 } else {
-                    // Reject invalid / anonymous token and keep WebView open for real login
                     capturedAccessToken.set("")
                     mainHandler.post {
                         verifyingSpotify.set(false)
@@ -553,10 +635,9 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
             }
             "spotify" -> {
                 val (cookies, spDc) = readSpotifyCookies(cm)
-                val onAccounts = currentUrl.contains("accounts.spotify.com", ignoreCase = true)
-                val onOpenSpotify = currentUrl.contains("open.spotify.com", ignoreCase = true)
-                val accessTok = capturedAccessToken.get()
-                val clientTok = capturedClientToken.get()
+                val onAccounts = currentUrl.contains("accounts.spotify.com", ignoreCase = true) ||
+                    currentUrl.contains("accounts.google.com", ignoreCase = true)
+                val onOpenSpotify = currentUrl.contains("://open.spotify.com", ignoreCase = true)
 
                 if (spDc.isBlank()) {
                     if (manualTap) {
@@ -568,12 +649,13 @@ class RyotunesAccountAuthActivity : AppCompatActivity() {
                 if (onAccounts || !onOpenSpotify) {
                     if (manualTap) {
                         Toast.makeText(this, "Abriendo open.spotify.com para validar sesión…", Toast.LENGTH_SHORT).show()
+                        desktopUaApplied = true
+                        webView.settings.userAgentString = cleanDesktopUa
                         webView.loadUrl("https://open.spotify.com/")
                     }
                     return
                 }
 
-                // Confirm page is NOT blocked with DRM error before validating against /v1/me
                 val drmCheckJs = """
                     (function(){
                       var t = (document.body && document.body.innerText) ? document.body.innerText.toLowerCase() : '';

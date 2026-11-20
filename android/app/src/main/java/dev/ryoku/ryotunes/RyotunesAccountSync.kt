@@ -451,7 +451,8 @@ object RyotunesAccountSync {
                     databaseEnabled = true
                     mediaPlaybackRequiresUserGesture = false
                     mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                    userAgentString = RyotunesAccountAuthActivity.SPOTIFY_DESKTOP_CHROME_UA
+                    userAgentString = RyotunesAccountAuthActivity.buildCleanDesktopUa(context)
+                    RyotunesAccountAuthActivity.suppressRequestedWithHeader(this)
                 }
 
                 // Grant Widevine DRM so open.spotify.com Web Player initializes cleanly
@@ -686,7 +687,7 @@ object RyotunesAccountSync {
 
         return buildMap {
             put("Authorization", "Bearer $accessToken")
-            put("User-Agent", RyotunesAccountAuthActivity.SPOTIFY_DESKTOP_CHROME_UA)
+            put("User-Agent", RyotunesAccountAuthActivity.buildCleanDesktopUa(context))
             put("Origin", "https://open.spotify.com")
             put("Referer", "https://open.spotify.com/")
             put("Accept", "application/json")
